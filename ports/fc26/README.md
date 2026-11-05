@@ -201,7 +201,9 @@ Variables:
    `~/Library/Application Support/FC26 Port/Players/<name>`, or any folder the player chooses. It
    holds the engine's portable `user/` directory (settings, saves, system modules, shader cache),
    `logs/`, `metrics/`, `shader-cache/` and `launcher.json`. The first use seeds
-   `user/config.json` from `managed.json`. The folder pickers and Play refuse game and player
+   `user/config.json` from `managed.json` and, when the folder holds no saves or trophies in
+   shadPS4's old locations, creates `user/home/1000/`, so the engine does not stop at its
+   save-migration question on a new folder. The folder pickers and Play refuse game and player
    folders that contain each other.
 3. System modules: shows whether `libSceJson.sprx`, `libSceJson2.sprx` and `libSceAudiodec.sprx`
    are in `user/sys_modules/`, explains that they come from the player's own console, and copies

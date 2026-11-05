@@ -97,11 +97,41 @@ struct PlayerData {
             if !manager.fileExists(atPath: engineConfig.path) {
                 try manager.copyItem(at: seedConfig, to: engineConfig)
             }
+            try createFirstUserHome()
         } catch {
             throw PlayerDataError.notWritable(root)
         }
         guard manager.isWritableFile(atPath: root.path) else {
             throw PlayerDataError.notWritable(root)
+        }
+    }
+
+    private func createFirstUserHome() throws {
+        let manager = FileManager.default
+        let firstUser = user.appendingPathComponent("home/1000", isDirectory: true)
+        let general = (try? loadEngineConfig())?["General"] as? [String: Any]
+        guard !manager.fileExists(atPath: firstUser.path), !hasLegacySavesOrTrophies,
+            (general?["home_dir"] as? String ?? "").isEmpty
+        else {
+            return
+        }
+        for folder in ["savedata", "trophy", "inputs"] {
+            try manager.createDirectory(
+                at: firstUser.appendingPathComponent(folder, isDirectory: true),
+                withIntermediateDirectories: true)
+        }
+    }
+
+    private var hasLegacySavesOrTrophies: Bool {
+        let manager = FileManager.default
+        let legacySaves = user.appendingPathComponent("savedata/1", isDirectory: true)
+        if let saves = try? manager.contentsOfDirectory(atPath: legacySaves.path), !saves.isEmpty {
+            return true
+        }
+        let legacyGames = user.appendingPathComponent("game_data", isDirectory: true)
+        let games = (try? manager.contentsOfDirectory(atPath: legacyGames.path)) ?? []
+        return games.contains {
+            manager.fileExists(atPath: legacyGames.appendingPathComponent("\($0)/TrophyFiles").path)
         }
     }
 
