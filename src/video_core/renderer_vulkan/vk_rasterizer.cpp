@@ -328,6 +328,22 @@ void Rasterizer::EliminateFastClear() {
     ScopeMarkerEnd();
 }
 
+/// Diagnostics: while the file named by SHADPS4_EXTRA_PASS_SPLIT_FILE exists, every 12th draw ends
+/// its render pass, so in-run A/B windows measure what a pass break costs the GPU thread.
+static bool ExtraPassSplit() {
+    static const char* const file = std::getenv("SHADPS4_EXTRA_PASS_SPLIT_FILE");
+    if (file == nullptr || file[0] == '\0') {
+        return false;
+    }
+    static u32 draws{};
+    static bool enabled{};
+    if ((draws & 4095) == 0) {
+        std::error_code ec;
+        enabled = std::filesystem::exists(file, ec);
+    }
+    return (++draws % 12) == 0 && enabled;
+}
+
 void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     RENDERER_TRACE;
 
@@ -385,6 +401,9 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     DebugState.IncDrawCall();
     if (trace) {
         EndTraceCommand();
+    }
+    if (ExtraPassSplit()) {
+        scheduler.EndRendering();
     }
 
     ResetBindings(false);
