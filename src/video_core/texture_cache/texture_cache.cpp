@@ -526,24 +526,28 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
             return {merged_image_id, -1, -1};
         }
 
-        // Same format, tiling, pitch and extent, and the cached image already holds the requested
-        // subresources, but the request computes a larger guest size. FC26 binds mip 0 of an
-        // 11-mip 1920x1080 B10G11R11 image as a 1-mip render target (0xba3500 vs 0x1000000
-        // bytes) and aborted here. Use a view of the cached image.
+        // Same format, tiling, pitch and extent, and the cached image holds the requested levels,
+        // but the request computes a larger guest size: the memory now backs another resource.
+        // FC26 binds a 1-mip 1920x1080 B10G11R11 render target over an 11-mip image of the same
+        // layout (0x1000000 vs 0xba3500 bytes). Returning a view of the cached image made
+        // KosmicKrisp abort on its view format check. Handle it like a pool reallocation: a
+        // separate image, and the old one is freed once it is idle.
         if (image_info.type == cache_image.info.type && image_info.pitch == cache_image.info.pitch &&
             image_info.size == cache_image.info.size &&
             cache_image.info.resources.Contains(image_info.resources)) {
-            // FC26 renders every mip of such an image each frame; log each address once.
             static std::unordered_set<VAddr> logged;
             if (logged.insert(image_info.guest_address).second) {
                 LOG_WARNING(Render_Vulkan,
-                            "Image at {:#x} requested with {} levels and size {:#x}, using the "
-                            "cached one with {} levels and size {:#x}",
+                            "Image at {:#x} requested with {} levels and size {:#x} over a cached "
+                            "one with {} levels and size {:#x}; allocating it separately",
                             image_info.guest_address, image_info.resources.levels,
                             image_info.guest_size, cache_image.info.resources.levels,
                             cache_image.info.guest_size);
             }
-            return {merged_image_id ? merged_image_id : cache_image_id, -1, -1};
+            if (safe_to_delete) {
+                FreeImage(cache_image_id);
+            }
+            return {merged_image_id, -1, -1};
         }
 
         // Enhanced debug logging for unreachable case
@@ -1381,6 +1385,27 @@ void TextureCache::GarbageCollectSamplers() {
 }
 
 void TextureCache::RunGarbageCollector() {
+    // SHADPS4_REFRESH_TEXTURES_FILE (diagnostics): when the file appears, every image used only as
+    // a texture is marked CpuDirty once, so its next use uploads it again from its current source
+    // (guest memory, or buffer data where the GPU wrote). Tells stale cached textures apart from
+    // wrong source data.
+    static const char* const refresh_file = std::getenv("SHADPS4_REFRESH_TEXTURES_FILE");
+    if (refresh_file != nullptr && refresh_file[0] != '\0') {
+        std::error_code ec;
+        if (std::filesystem::exists(refresh_file, ec)) {
+            std::filesystem::remove(refresh_file, ec);
+            u32 marked{};
+            image_lru_cache.ForEachItemBelow(~u64{0}, [&](Image& image) {
+                if (!image.usage.render_target && !image.usage.depth_target &&
+                    !image.usage.storage && !image.usage.vo_surface) {
+                    image.flags |= ImageFlagBits::CpuDirty;
+                    ++marked;
+                }
+                return false;
+            });
+            LOG_INFO(Render_Vulkan, "Marked {} texture images for refresh", marked);
+        }
+    }
     GarbageCollectImages();
     GarbageCollectSamplers();
     ++gc_tick;
