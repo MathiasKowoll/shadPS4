@@ -1083,6 +1083,28 @@ void TextureCache::RefreshImage(Image& image) {
         return;
     }
 
+    // SHADPS4_UPLOAD_HASH_LOG=1 (diagnostics): log every upload of a large block-compressed
+    // texture with a hash of the guest memory it comes from. Two kit textures uploaded with the
+    // same hash hold the same kit; a texture whose forced refresh brings a new hash was stale.
+    static const bool upload_hash_log = [] {
+        const char* value = std::getenv("SHADPS4_UPLOAD_HASH_LOG");
+        return value != nullptr && value[0] == '1';
+    }();
+    if (upload_hash_log && image.info.props.is_block && image.info.guest_size >= 256_KB) {
+        const bool from_gpu =
+            buffer_cache.IsRegionGpuModified(image.info.guest_address, image.info.guest_size);
+        const u64 hash =
+            from_gpu ? 0 : HashBackingMemory(image.info.guest_address, image.info.guest_size);
+        LOG_INFO(Render_Vulkan,
+                 "UploadHash frame={} {:#x}+{:#x} {}x{} {} levels={} layers={} flags={:#x} "
+                 "source={} hash={:#018x}",
+                 DebugState.GetFrameNum(), image.info.guest_address, image.info.guest_size,
+                 image.info.size.width, image.info.size.height,
+                 vk::to_string(image.info.pixel_format), image.info.resources.levels,
+                 image.info.resources.layers, static_cast<u32>(image.flags),
+                 from_gpu ? "gpu" : "guest", hash);
+    }
+
     scheduler.EndRendering();
 
     const auto [in_buffer, in_offset] =
