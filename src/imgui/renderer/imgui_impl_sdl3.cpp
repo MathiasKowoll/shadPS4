@@ -3,6 +3,11 @@
 
 // Based on imgui_impl_sdl3.cpp from Dear ImGui repository
 
+#include <algorithm>
+#include <functional>
+#include <vector>
+#include <cstdio>
+#include <cstdlib>
 #include <imgui.h>
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
@@ -55,6 +60,11 @@ struct SdlData {
     std::array<float, 60> framerateSecPerFrame;
     int framerateSecPerFrameIdx{};
     float framerateSecPerFrameAcc{};
+
+    // Optional low-frequency metrics for unattended performance measurements.
+    std::FILE* frame_metrics_file{};
+    Uint64 frame_metrics_start_time{};
+    Uint64 frame_metrics_last_time{};
 };
 
 // Backend data stored in io.BackendPlatformUserData to allow support for multiple Dear ImGui
@@ -539,6 +549,19 @@ bool Init(SDL_Window* window) {
     bd->window = window;
     bd->window_id = SDL_GetWindowID(window);
 
+    if (const char* metrics_path = std::getenv("SHADPS4_FRAME_METRICS_PATH");
+        metrics_path != nullptr && metrics_path[0] != '\0') {
+        bd->frame_metrics_file = std::fopen(metrics_path, "w");
+        if (bd->frame_metrics_file != nullptr) {
+            std::fputs("elapsed_seconds,frame,fps,frame_time_ms,draw_calls,dispatches,"
+                       "compiles,compile_ms,gpu_waits,gpu_wait_ms,cpu_invalidations,downloads,"
+                       "upload_kb,hash_kb,hash_skips,gc_evict,gc_dl,gc_hash,direct_dl,direct_nowait,"
+                       "released_pages,rp_begins,copy_splits,deferred_uploads\n",
+                       bd->frame_metrics_file);
+            std::fflush(bd->frame_metrics_file);
+        }
+    }
+
     ImGuiPlatformIO& platform_io = ImGui::GetPlatformIO();
     platform_io.Platform_SetClipboardTextFn = SetClipboardText;
     platform_io.Platform_GetClipboardTextFn = GetClipboardText;
@@ -599,6 +622,9 @@ void Shutdown() {
     for (ImGuiMouseCursor cursor_n = 0; cursor_n < ImGuiMouseCursor_COUNT; cursor_n++)
         SDL_DestroyCursor(bd->mouse_cursors[cursor_n]);
     CloseGamepads();
+    if (bd->frame_metrics_file != nullptr) {
+        std::fclose(bd->frame_metrics_file);
+    }
 
     io.BackendPlatformName = nullptr;
     io.BackendPlatformUserData = nullptr;
@@ -840,6 +866,102 @@ void NewFrame(bool is_reusing_frame) {
         framerateSec = deltaTime;
         frameIdx = (frameIdx + 1) % count;
         DebugState.Framerate = acc > 0.0f ? 1.0f / (acc / (float)count) : FLT_MAX;
+
+        if (bd->frame_metrics_file != nullptr) {
+            if (bd->frame_metrics_start_time == 0) {
+                bd->frame_metrics_start_time = current_time;
+                bd->frame_metrics_last_time = current_time;
+            } else if (current_time - bd->frame_metrics_last_time >= frequency) {
+                const double elapsed =
+                    static_cast<double>(current_time - bd->frame_metrics_start_time) /
+                    static_cast<double>(frequency);
+                const float fps = DebugState.Framerate;
+                using Counter = DebugStateType::DebugStateImpl::PerfCounter;
+                std::fprintf(bd->frame_metrics_file,
+                             "%.3f,%u,%.3f,%.3f,%.1f,%.1f,%llu,%.1f,%llu,%.1f,%llu,%llu,%llu,%llu,%llu,%llu,"
+                             "%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu\n",
+                             elapsed, DebugState.GetFrameNum(), fps, 1000.0f / fps,
+                             DebugState.GetDrawCallsAvg(), DebugState.GetDispatchesAvg(),
+                             static_cast<unsigned long long>(
+                                 DebugState.TakePerf(Counter::PipelineCompiles)),
+                             DebugState.TakePerf(Counter::PipelineCompileUs) / 1000.0,
+                             static_cast<unsigned long long>(DebugState.TakePerf(Counter::GpuWaits)),
+                             DebugState.TakePerf(Counter::GpuWaitUs) / 1000.0,
+                             static_cast<unsigned long long>(
+                                 DebugState.TakePerf(Counter::CpuInvalidations)),
+                             static_cast<unsigned long long>(DebugState.TakePerf(Counter::Downloads)),
+                             static_cast<unsigned long long>(
+                                 DebugState.TakePerf(Counter::UploadBytes) / 1024),
+                             static_cast<unsigned long long>(
+                                 DebugState.TakePerf(Counter::ImageHashBytes) / 1024),
+                             static_cast<unsigned long long>(
+                                 DebugState.TakePerf(Counter::ImageHashSkips)),
+                             static_cast<unsigned long long>(
+                                 DebugState.TakePerf(Counter::GcEvictions)),
+                             static_cast<unsigned long long>(
+                                 DebugState.TakePerf(Counter::GcDownloads)),
+                             static_cast<unsigned long long>(
+                                 DebugState.TakePerf(Counter::GcHashChecks)),
+                             static_cast<unsigned long long>(
+                                 DebugState.TakePerf(Counter::DirectDownloads)),
+                             static_cast<unsigned long long>(
+                                 DebugState.TakePerf(Counter::DirectDownloadsNoWait)),
+                             static_cast<unsigned long long>(
+                                 DebugState.TakePerf(Counter::ReleasedPages)),
+                             static_cast<unsigned long long>(
+                                 DebugState.TakePerf(Counter::RenderPassBegins)),
+                             static_cast<unsigned long long>(
+                                 DebugState.TakePerf(Counter::CopySplits)),
+                             static_cast<unsigned long long>(
+                                 DebugState.TakePerf(Counter::DeferredUploads)));
+                std::fflush(bd->frame_metrics_file);
+                // SHADPS4_FAULT_HIST=<path>: every second, append the 12 64 KB regions that took
+                // the most CPU write faults ("elapsed region count ...").
+                static std::FILE* const fault_file = [] -> std::FILE* {
+                    const char* path = std::getenv("SHADPS4_FAULT_HIST");
+                    return (path != nullptr && path[0] != '\0') ? std::fopen(path, "w") : nullptr;
+                }();
+                // SHADPS4_RP_HIST=<path>: every second, the 12 call sites that ended the most render
+                // passes ("elapsed address:count ..."); symbolize with nm.
+                static std::FILE* const pass_file = [] -> std::FILE* {
+                    const char* path = std::getenv("SHADPS4_RP_HIST");
+                    return (path != nullptr && path[0] != '\0') ? std::fopen(path, "w") : nullptr;
+                }();
+                if (pass_file != nullptr) {
+                    std::vector<std::pair<u32, u64>> sites;
+                    DebugState.TakePassEnds(
+                        [&](u64 site, u32 count) { sites.emplace_back(count, site); });
+                    const size_t top = std::min<size_t>(sites.size(), 12);
+                    std::partial_sort(sites.begin(), sites.begin() + top, sites.end(),
+                                      std::greater<>{});
+                    std::fprintf(pass_file, "%.3f", elapsed);
+                    for (size_t i = 0; i < top; ++i) {
+                        std::fprintf(pass_file, " %llx:%u",
+                                     static_cast<unsigned long long>(sites[i].second),
+                                     sites[i].first);
+                    }
+                    std::fputc('\n', pass_file);
+                    std::fflush(pass_file);
+                }
+                if (fault_file != nullptr) {
+                    std::vector<std::pair<u32, u64>> regions;
+                    DebugState.TakeFaults(
+                        [&](u64 region, u32 count) { regions.emplace_back(count, region); });
+                    const size_t top = std::min<size_t>(regions.size(), 12);
+                    std::partial_sort(regions.begin(), regions.begin() + top, regions.end(),
+                                      std::greater<>{});
+                    std::fprintf(fault_file, "%.3f", elapsed);
+                    for (size_t i = 0; i < top; ++i) {
+                        std::fprintf(fault_file, " %llx:%u",
+                                     static_cast<unsigned long long>(regions[i].second),
+                                     regions[i].first);
+                    }
+                    std::fputc('\n', fault_file);
+                    std::fflush(fault_file);
+                }
+                bd->frame_metrics_last_time = current_time;
+            }
+        }
     }
 
     if (bd->mouse_pending_leave_frame && bd->mouse_pending_leave_frame >= ImGui::GetFrameCount() &&

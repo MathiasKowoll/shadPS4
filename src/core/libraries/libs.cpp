@@ -41,6 +41,7 @@
 #include "core/libraries/network/netctl.h"
 #include "core/libraries/network/ssl.h"
 #include "core/libraries/network/ssl2.h"
+#include "core/libraries/json/json.h"
 #include "core/libraries/np/np_auth/np_auth.h"
 #include "core/libraries/np/np_commerce/np_commerce.h"
 #include "core/libraries/np/np_common.h"
@@ -200,6 +201,7 @@ void InitHLELibs(Core::Loader::SymbolsResolver* sym) {
             {"libSceVideoRecording.sprx", Libraries::VideoRecording::RegisterLib},
             {"libSceInvitationDialog.sprx", Libraries::InvitationDialog::RegisterLib},
             {"libSceNpUtility.sprx", Libraries::Np::NpUtility::RegisterLib},
+            {"libSceJson2.sprx", Libraries::Json::RegisterLib},
 #ifdef ARCH_X86_64
             {"libSceFiber.sprx", Libraries::Fiber::RegisterLib},
 #endif

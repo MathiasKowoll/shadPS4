@@ -2323,7 +2323,8 @@ s32 PS4_SYSV_ABI posix_unlink(const char* path) {
 s32 PS4_SYSV_ABI sceKernelUnlink(const char* path) {
     s32 result = posix_unlink(path);
     if (result < 0) {
-        LOG_ERROR(Kernel_Fs, "error = {}", *__Error());
+        LOG_ERROR(Kernel_Fs, "sceKernelUnlink: path = {}, error = {}",
+                  path != nullptr ? path : "<null>", *__Error());
         return ErrnoToSceKernelError(*__Error());
     }
     return result;
@@ -2461,6 +2462,7 @@ void RegisterFileSystem(Core::Loader::SymbolsResolver* sym) {
     LIB_FUNCTION("FN4gaPmuFV8", "libkernel", 1, "libkernel", posix_write);
     LIB_FUNCTION("4wSze92BhLI", "libkernel", 1, "libkernel", sceKernelWrite);
     LIB_FUNCTION("+WRlkKjZvag", "libkernel", 1, "libkernel", readv);
+    LIB_FUNCTION("I7ImcLds-uU", "libScePosix", 1, "libkernel", posix_readv);
     LIB_FUNCTION("I7ImcLds-uU", "libkernel", 1, "libkernel", readv);
     LIB_FUNCTION("QqxBetgJH+g", "libkernel", 1, "libkernel", sceKernelReadv);
     LIB_FUNCTION("YSHRBRLn2pI", "libkernel", 1, "libkernel", writev);

@@ -634,6 +634,12 @@ void Emulator::Run(std::filesystem::path file, std::vector<std::string> args,
     }
     mnt->Mount(mount_download_dir, "/download0");
 
+    // Keep the guest application's cache separate from the emulator's shader and pipeline cache.
+    const auto mount_cache_dir =
+        Common::FS::GetUserPath(Common::FS::PathType::CacheDir) / "guest" / id;
+    std::filesystem::create_directories(mount_cache_dir);
+    mnt->Mount(mount_cache_dir, "/cache");
+
     const auto mount_usb_dir = Libraries::UsbStorage::GetUsbMountPath();
     std::error_code ec_usb;
     std::filesystem::create_directories(mount_usb_dir, ec_usb);

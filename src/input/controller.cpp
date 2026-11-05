@@ -170,6 +170,21 @@ void GameController::ConnectController(SDL_Gamepad* pad) {
     PushStateLocked();
 }
 
+void GameController::ConnectScripted() {
+    {
+        std::lock_guard lock{m_state_mutex};
+        if (m_state.connected) {
+            return;
+        }
+    }
+    if (auto* user = UserManagement.GetUserByPlayerIndex(1)) {
+        user_id = user->user_id;
+        UserManagement.LoginUser(user, 1);
+    }
+    ConnectController(nullptr);
+    LOG_INFO(Input, "Connected a scripted virtual pad for player 1");
+}
+
 void GameController::DisconnectController() {
     std::lock_guard lock{m_state_mutex};
     m_states_queue.Clear();

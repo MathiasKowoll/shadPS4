@@ -590,6 +590,10 @@ set(RANDOM_LIB src/core/libraries/random/random.cpp
                src/core/libraries/random/random_error.h
 )
 
+set(JSON_LIB src/core/libraries/json/json.cpp
+             src/core/libraries/json/json.h
+)
+
 set(USBD_LIB src/core/libraries/usbd/usbd.cpp
              src/core/libraries/usbd/usbd.h
              src/core/libraries/usbd/usb_backend.h
@@ -987,6 +991,7 @@ set(CORE src/core/aerolib/stubs.cpp
          ${JPEG_LIB}
          ${PLAYGO_LIB}
          ${RANDOM_LIB}
+         ${JSON_LIB}
          ${USBD_LIB}
          ${MUSIC_LIB}
          ${ZLIB_LIB}
@@ -1102,6 +1107,7 @@ set(SHADER_RECOMPILER src/shader_recompiler/profile.h
                       src/shader_recompiler/ir/passes/lower_fp64_to_fp32.cpp
                       src/shader_recompiler/ir/passes/lower_hardware_intrinsics.cpp
                       src/shader_recompiler/ir/passes/lower_user_clip_planes.cpp
+                      src/shader_recompiler/ir/passes/lower_dynamic_read_const_pass.cpp
                       src/shader_recompiler/ir/passes/lower_wave64_pass.cpp
                       src/shader_recompiler/ir/passes/phi_simplification_pass.cpp
                       src/shader_recompiler/ir/passes/readlane_elimination_pass.cpp

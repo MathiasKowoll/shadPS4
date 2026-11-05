@@ -400,6 +400,16 @@ public:
         return render_state;
     }
 
+    /// True while a render pass is open in the current command buffer.
+    bool IsRendering() const {
+        return is_rendering;
+    }
+
+    /// Increments every time a new session (command buffer) starts.
+    u64 SessionSerial() const {
+        return session_serial;
+    }
+
     /// Returns the current pipeline dynamic state tracking.
     DynamicState& GetDynamicState() {
         return dynamic_state;
@@ -468,6 +478,7 @@ private:
         vk::CommandBuffer primary{};
     };
     std::vector<Session> sessions;
+    u64 session_serial{};
     std::condition_variable_any event_cv;
     struct PendingOp {
         Common::UniqueFunction<void> callback;

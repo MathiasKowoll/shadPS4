@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <chrono>
+#include <filesystem>
 #include <magic_enum/magic_enum.hpp>
 #include <xxhash.h>
 
@@ -22,6 +24,37 @@
 #include <vk_mem_alloc.h>
 
 namespace VideoCore {
+
+namespace {
+
+/// A/B switch file for diagnostics, named by an environment variable. Hot paths ask per fault or
+/// per upload, so the file is looked at no more than twice a second (a stat costs microseconds
+/// under Rosetta, and counting calls still cost 4% of the GPU thread on a per-binding path).
+class SwitchFile {
+public:
+    explicit SwitchFile(const char* env) : path{std::getenv(env)} {}
+
+    bool Exists() {
+        if (path == nullptr || path[0] == '\0') {
+            return false;
+        }
+        const s64 now = std::chrono::steady_clock::now().time_since_epoch().count();
+        s64 next = next_check.load(std::memory_order_relaxed);
+        if (now >= next && next_check.compare_exchange_strong(
+                               next, now + 500'000'000, std::memory_order_relaxed)) {
+            std::error_code ec;
+            exists.store(std::filesystem::exists(path, ec), std::memory_order_relaxed);
+        }
+        return exists.load(std::memory_order_relaxed);
+    }
+
+private:
+    const char* path;
+    std::atomic<s64> next_check{};
+    std::atomic<bool> exists{};
+};
+
+} // Anonymous namespace
 
 static constexpr size_t GDS_BUFFER_SIZE = 64_KB;
 static constexpr size_t NULL_INDEX_BUFFER_SIZE = 16;
@@ -97,11 +130,45 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
         FindMemoryType(instance.GetMemoryProperties(), vk::MemoryPropertyFlagBits::eDeviceLocal,
                        reqs.memoryTypeBits)
             .value();
+    const auto& memory_properties = instance.GetMemoryProperties();
+    for (u32 i = 0; i < memory_properties.memoryTypeCount; ++i) {
+        LOG_INFO(Render_Vulkan, "Memory type {}: heap {} {}{}", i,
+                 memory_properties.memoryTypes[i].heapIndex,
+                 vk::to_string(memory_properties.memoryTypes[i].propertyFlags),
+                 ((reqs.memoryTypeBits >> i) & 1) ? " (sparse arena capable)" : "");
+    }
+    // SHADPS4_DIRECT_DOWNLOAD=1 backs the arena with host-visible memory so readbacks can copy
+    // finished GPU writes directly instead of draining the whole queue.
+    if (const char* value = std::getenv("SHADPS4_DIRECT_DOWNLOAD");
+        value != nullptr && value[0] == '1') {
+        constexpr auto host_flags = vk::MemoryPropertyFlagBits::eDeviceLocal |
+                                    vk::MemoryPropertyFlagBits::eHostVisible |
+                                    vk::MemoryPropertyFlagBits::eHostCoherent;
+        if (const auto index =
+                FindMemoryType(memory_properties, host_flags, reqs.memoryTypeBits)) {
+            arena_memory_type_index = *index;
+            direct_downloads = true;
+        } else {
+            LOG_WARNING(Render_Vulkan, "No host-visible memory type can back the sparse arena");
+        }
+    }
+    LOG_INFO(Render_Vulkan, "Buffer arena: memory type {}, block size {:#x}, direct downloads {}",
+             arena_memory_type_index, block_size, direct_downloads);
+    if (const char* value = std::getenv("SHADPS4_FAULT_EXPAND"); value != nullptr && value[0] == '1') {
+        expand_faults = true;
+    }
+    if (const char* value = std::getenv("SHADPS4_DEFER_UPLOADS"); value != nullptr && value[0] == '1') {
+        defer_uploads = true;
+    }
+    LOG_INFO(Render_Vulkan, "Uploads before the session when possible: {}", defer_uploads);
+    LOG_INFO(Render_Vulkan, "Hot block release on write faults: {}", expand_faults);
 
     const u64 bda_pagetable_size =
         (blocks_per_arena_page * NUM_ARENA_PAGES) * sizeof(vk::DeviceAddress);
     fault_manager = std::make_unique<FaultManager>(instance, scheduler, *this, block_shift,
                                                    blocks_per_arena_page * NUM_ARENA_PAGES);
+    runtime.FillBuffer(fault_manager->GetFaultBuffer(), 0u,
+                       fault_manager->GetFaultBuffer()->SizeBytes(), 0u);
     bda_pagetable_buffer = std::make_unique<Buffer>(
         instance, 0, bda_pagetable_size, MemoryType::DeviceLocal, "BDA Page Table Buffer");
     runtime.FillBuffer(bda_pagetable_buffer.get(), 0u, bda_pagetable_size, 0u);
@@ -124,6 +191,44 @@ void BufferCache::InvalidateMemory(VAddr device_addr, u64 size, bool assume_lock
     memory_tracker->InvalidateRegion(device_addr, size, [this, device_addr, size, assume_locks] {
         ReadMemory(device_addr, size, true, false, assume_locks);
     });
+    if (expand_faults) {
+        ReleaseHotBlock(device_addr);
+    }
+}
+
+void BufferCache::ReleaseHotBlock(VAddr device_addr) {
+    // Guest code that streams per-frame data (constant rings, instance data) writes every 4 KB page
+    // of a block once per frame, and each first write is a fault. Under Rosetta a fault costs tens
+    // of microseconds, and FC26 took ~17k of them per second. After a block has faulted a few times
+    // in the current epoch, its remaining clean pages are released at once; they are uploaded on
+    // their next GPU use, like any CPU-modified page.
+    static SwitchFile expand_off{"SHADPS4_FAULT_EXPAND_OFF_FILE"};
+    if (expand_off.Exists()) {
+        return;
+    }
+    constexpr u64 BlockBits = 16;
+    constexpr u64 Threshold = 3;
+    const u64 block = device_addr >> BlockBits;
+    const u64 epoch = (DebugState.GetFrameNum() >> 3) & 0xffff;
+    auto& slot = hot_blocks[(block ^ (block >> 12)) & (HotBlockSlots - 1)];
+    u64 value = slot.load(std::memory_order_relaxed);
+    u64 count;
+    for (;;) {
+        const bool same = (value >> 24) == block && ((value >> 8) & 0xffff) == epoch;
+        count = same ? std::min<u64>((value & 0xff) + 1, 0xff) : 1;
+        const u64 next = (block << 24) | (epoch << 8) | count;
+        if (slot.compare_exchange_weak(value, next, std::memory_order_relaxed)) {
+            break;
+        }
+    }
+    if (count != Threshold) {
+        return;
+    }
+    // Only pages that were uploaded (write-protected, clean) are released; pages never used by the
+    // GPU are still marked CPU modified and are skipped.
+    const VAddr block_addr = block << BlockBits;
+    const u64 released = memory_tracker->ReleaseCleanPages(block_addr, u64{1} << BlockBits);
+    DebugState.AddPerf(DebugStateType::DebugStateImpl::PerfCounter::ReleasedPages, released);
 }
 
 void BufferCache::UnmarkRegionAsGpuModified(VAddr device_addr, u64 size, bool is_write) {
@@ -182,6 +287,11 @@ void BufferCache::DownloadMemory(const Buffer* arena, VAddr device_addr, u64 siz
     if (total_size_bytes == 0) {
         return;
     }
+    DebugState.AddPerf(DebugStateType::DebugStateImpl::PerfCounter::Downloads);
+    if (!async && TryDirectDownload(arena_base, copies)) {
+        memory_tracker->UnmarkRegionAsGpuModified(device_addr, size, false);
+        return;
+    }
     const auto download =
         staging_pool.Request(total_size_bytes, VideoCore::MemoryType::HostCached, 16, async);
     for (auto& copy : copies) {
@@ -212,6 +322,70 @@ void BufferCache::DownloadMemory(const Buffer* arena, VAddr device_addr, u64 siz
     }
 }
 
+void BufferCache::MarkBlocksWritten(VAddr addr, u64 size) {
+    if (!direct_downloads || size == 0) {
+        return;
+    }
+    const u64 tick = scheduler.CurrentTick();
+    const u64 last_block = (addr + size - 1) >> block_shift;
+    for (u64 block = addr >> block_shift; block <= last_block; ++block) {
+        block_write_ticks[block] = tick;
+    }
+}
+
+bool BufferCache::TryDirectDownload(VAddr arena_base, std::span<const vk::BufferCopy> copies) {
+    if (!direct_downloads) {
+        return false;
+    }
+    // A/B switch: while SHADPS4_DIRECT_DOWNLOAD_OFF_FILE names an existing file, use the queue path.
+    static const char* const off_file = std::getenv("SHADPS4_DIRECT_DOWNLOAD_OFF_FILE");
+    if (off_file != nullptr && off_file[0] != '\0') {
+        std::error_code ec;
+        if (std::filesystem::exists(off_file, ec)) {
+            return false;
+        }
+    }
+    // Every block must be resident in mapped memory and have a known last writer.
+    u64 wait_tick = 0;
+    for (const auto& copy : copies) {
+        const VAddr start = arena_base + copy.srcOffset;
+        const u64 last_block = (start + copy.size - 1) >> block_shift;
+        for (u64 block = start >> block_shift; block <= last_block; ++block) {
+            const auto tick = block_write_ticks.find(block);
+            const auto backing = resident_ranges.Find(block);
+            if (tick == block_write_ticks.end() || backing == resident_ranges.end() ||
+                backing->mapped == nullptr) {
+                return false;
+            }
+            wait_tick = std::max(wait_tick, tick->second);
+        }
+    }
+    if (scheduler.IsFree(wait_tick)) {
+        DebugState.AddPerf(DebugStateType::DebugStateImpl::PerfCounter::DirectDownloadsNoWait);
+    } else {
+        scheduler.Wait(wait_tick);
+    }
+    DebugState.AddPerf(DebugStateType::DebugStateImpl::PerfCounter::DirectDownloads);
+    for (const auto& copy : copies) {
+        VAddr addr = arena_base + copy.srcOffset;
+        u64 remaining = copy.size;
+        while (remaining != 0) {
+            const u64 block = addr >> block_shift;
+            const auto backing = resident_ranges.Find(block);
+            const u64 in_block = addr & (u64{block_size} - 1);
+            const u64 chunk =
+                std::min<u64>(remaining, ((backing->end - block) << block_shift) - in_block);
+            const u8* src =
+                backing->mapped + ((backing->offset + (block - backing->start)) << block_shift) +
+                in_block;
+            memory->TryWriteBacking(std::bit_cast<u8*>(addr), src, chunk);
+            addr += chunk;
+            remaining -= chunk;
+        }
+    }
+    return true;
+}
+
 std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 size,
                                                         ObtainBufferFlags flags) {
     const bool is_written = True(flags & ObtainBufferFlags::IsWritten);
@@ -232,9 +406,31 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
     if (is_written) {
         texture_cache.MarkAsMaybeGpuDirty(device_addr, size);
     }
-    SynchronizeMemory(arena, device_addr, size, is_written, is_texel_buffer);
+    if (session_used_serial != scheduler.SessionSerial()) {
+        session_used.Clear();
+        session_used_serial = scheduler.SessionSerial();
+    }
+    obtain_caller = __builtin_return_address(0);
+    SynchronizeMemory(arena, device_addr, size, defer_uploads, is_written, is_texel_buffer);
+    // An unbounded binding spans up to the arena page (tens of MB). Recording only its head lets
+    // later uploads in that span run before the session (FC26 replays: ~40 fewer pass splits per
+    // frame) but is unsafe when the shader reads past the head: off by default since FC26 showed
+    // exploded crowd-card geometry with a 64 KB head. SHADPS4_UNBOUNDED_FOOTPRINT_KB=64 tries it.
+    u64 used_size = size;
+    if (True(flags & ObtainBufferFlags::LooseFootprint) && !is_written) {
+        static const u64 footprint = [] {
+            const char* value = std::getenv("SHADPS4_UNBOUNDED_FOOTPRINT_KB");
+            return (value != nullptr ? std::strtoull(value, nullptr, 10) : u64{0}) << 10;
+        }();
+        static SwitchFile footprint_off{"SHADPS4_UNBOUNDED_FOOTPRINT_OFF_FILE"};
+        if (footprint != 0 && !footprint_off.Exists()) {
+            used_size = std::min<u64>(size, footprint);
+        }
+    }
+    session_used.Add(device_addr, used_size);
     if (is_written) {
         gpu_modified_ranges.Add(device_addr, size);
+        MarkBlocksWritten(device_addr, size);
     }
     return {arena, arena->Offset(device_addr)};
 }
@@ -323,8 +519,20 @@ void BufferCache::SynchronizeDmaBuffers() {
         const u64 page = range.start >> (ARENA_PAGE_BITS - block_shift);
         const VAddr device_addr = range.start << block_shift;
         const u64 size = (range.end - range.start) << block_shift;
-        SynchronizeMemory(address_space[page], device_addr, size, false, false);
+        SynchronizeMemory(address_space[page], device_addr, size, false, false, false);
     }
+}
+
+void BufferCache::PreloadDmaSrt(VAddr device_addr) {
+    if (device_addr == 0 || !memory->IsValidGpuMapping(device_addr, block_size) ||
+        !memory->IsValidMapping(device_addr, block_size)) {
+        return;
+    }
+
+    // Dynamic SRT indexing is evaluated by the guest shader, so the host walker cannot know the
+    // exact descriptor offset. Upload one sparse-page worth of the table from its known root. The
+    // normal fault path remains available if a genuinely larger table crosses this window.
+    (void)ObtainBuffer(device_addr, block_size, ObtainBufferFlags::IgnoreStreamBuffer);
 }
 
 const Buffer* BufferCache::GetArena(u64 first_block, u64 last_block) {
@@ -348,7 +556,8 @@ const Buffer* BufferCache::GetArena(u64 first_block, u64 last_block) {
         return address_space[first_page];
     }
 
-    LOG_WARNING(Render, "Migrating arena");
+    LOG_WARNING(Render, "Migrating arena for blocks {:#x}..{:#x} (VA {:#x}..{:#x})", first_block,
+                last_block, first_block << block_shift, (last_block + 1) << block_shift);
 
     const u64 first_addr = first_arena ? first_arena->cpu_addr : (first_page << ARENA_PAGE_BITS);
     const u64 first_size = first_arena ? first_arena->size_bytes : ARENA_PAGE_SIZE;
@@ -403,6 +612,18 @@ void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_
         .memoryTypeIndex = arena_memory_type_index,
     };
     const auto device_memory = Vulkan::Check(instance.GetDevice().allocateMemory(alloc_info));
+    u8* mapped_memory = nullptr;
+    if (direct_downloads) {
+        const auto [map_result, pointer] =
+            instance.GetDevice().mapMemory(device_memory, 0, VK_WHOLE_SIZE);
+        if (map_result == vk::Result::eSuccess) {
+            mapped_memory = static_cast<u8*>(pointer);
+        } else {
+            LOG_WARNING(Render_Vulkan, "Could not map arena memory ({}), direct downloads off",
+                        vk::to_string(map_result));
+            direct_downloads = false;
+        }
+    }
 
     boost::container::small_vector<vk::BufferCopy, 8> copies;
     const auto staging =
@@ -418,6 +639,7 @@ void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_
         backing.end = range.end;
         backing.memory = device_memory;
         backing.offset = memory_offset >> block_shift;
+        backing.mapped = mapped_memory;
         resident_ranges.Add(backing);
 
         LOG_INFO(Render, "Making range start={}, end={} resident", backing.start, backing.end);
@@ -447,8 +669,43 @@ void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_
     }
 }
 
+void BufferCache::LogInlineUpload(const Buffer* arena, VAddr device_addr, u32 size,
+                                  std::span<const vk::BufferCopy> copies, bool is_written) {
+    // SHADPS4_INLINE_UPLOAD_LOG=<file>: creating the file logs the next 400 uploads that end an
+    // open render pass, then the file is removed.
+    static const char* const trigger = std::getenv("SHADPS4_INLINE_UPLOAD_LOG");
+    static u32 budget{};
+    static u32 calls{};
+    if (trigger == nullptr || trigger[0] == '\0') {
+        return;
+    }
+    if (budget == 0) {
+        if ((++calls & 63) != 0) {
+            return;
+        }
+        std::error_code ec;
+        if (!std::filesystem::exists(trigger, ec)) {
+            return;
+        }
+        std::filesystem::remove(trigger, ec);
+        budget = 400;
+    }
+    --budget;
+    u64 dirty_bytes{};
+    VAddr first_dirty = ~VAddr{0};
+    for (const auto& copy : copies) {
+        dirty_bytes += copy.size;
+        first_dirty = std::min<VAddr>(first_dirty, arena->cpu_addr + copy.dstOffset);
+    }
+    LOG_INFO(Render_Vulkan,
+             "Inline upload session={} bound={:#x}+{:#x} written={} dirty={:#x} ranges={} "
+             "bytes={:#x} caller={}",
+             scheduler.SessionSerial(), device_addr, size, is_written, first_dirty, copies.size(),
+             dirty_bytes, fmt::ptr(obtain_caller));
+}
+
 bool BufferCache::SynchronizeMemory(const Buffer* arena, VAddr device_addr, u32 size,
-                                    bool is_written, bool is_texel_buffer) {
+                                    bool allow_defer, bool is_written, bool is_texel_buffer) {
     boost::container::small_vector<vk::BufferCopy, 4> copies;
     size_t total_size_bytes{};
     memory_tracker->ForEachUploadRange(device_addr, size, is_written, [&](u64 addr, u64 size) {
@@ -456,6 +713,7 @@ bool BufferCache::SynchronizeMemory(const Buffer* arena, VAddr device_addr, u32 
         total_size_bytes += size;
     });
     if (!copies.empty()) {
+        DebugState.AddPerf(DebugStateType::DebugStateImpl::PerfCounter::UploadBytes, total_size_bytes);
         const auto staging = staging_pool.Request(total_size_bytes, MemoryType::HostUncached);
         for (auto& copy : copies) {
             memory->CopySparseMemory(copy.dstOffset, staging.mapped + copy.srcOffset, copy.size);
@@ -463,7 +721,31 @@ bool BufferCache::SynchronizeMemory(const Buffer* arena, VAddr device_addr, u32 
             copy.dstOffset -= arena->cpu_addr;
         }
         staging.Flush();
-        runtime.CopyBuffer(staging.buffer, arena, copies);
+        // Uploads are recorded while draws are bound, so the copy would end the open render pass,
+        // and on a tiler every split stores and reloads all attachments. When nothing in this
+        // session has used the destination yet, run the copy before the session instead.
+        static SwitchFile defer_off{"SHADPS4_DEFER_UPLOADS_OFF_FILE"};
+        bool defer = allow_defer && !defer_off.Exists();
+        for (const auto& copy : copies) {
+            if (!defer) {
+                break;
+            }
+            defer = !session_used.Intersects(arena->cpu_addr + copy.dstOffset, copy.size);
+        }
+        if (defer) {
+            runtime.CopyBufferBeforeSession(staging.buffer, arena, copies);
+            DebugState.AddPerf(DebugStateType::DebugStateImpl::PerfCounter::DeferredUploads);
+        } else {
+            if (scheduler.IsRendering()) {
+                // Attribute the split to the binding that asked for the buffer (diagnostics).
+                DebugState.AddPassEnd(obtain_caller);
+                LogInlineUpload(arena, device_addr, size, copies, is_written);
+            }
+            runtime.CopyBuffer(staging.buffer, arena, copies);
+        }
+        for (const auto& copy : copies) {
+            MarkBlocksWritten(arena->cpu_addr + copy.dstOffset, copy.size);
+        }
     }
     if (is_texel_buffer && !is_written) {
         return SynchronizeMemoryFromImage(arena, device_addr, size);
@@ -476,6 +758,7 @@ bool BufferCache::SynchronizeMemoryFromImage(const Buffer* arena, VAddr device_a
         if (meta->type == TextureCache::MetaType::HTile) {
             static constexpr u32 ZmaskUncompressed = 0xf;
             runtime.FillBuffer(arena, arena->Offset(device_addr), size, ZmaskUncompressed);
+            MarkBlocksWritten(device_addr, size);
             return true;
         } else if (meta->type == TextureCache::MetaType::CMask) {
             const auto expanded_value = CmaskColorExpandedValue(meta->num_samples);
@@ -488,6 +771,7 @@ bool BufferCache::SynchronizeMemoryFromImage(const Buffer* arena, VAddr device_a
                 return false;
             }
             runtime.FillBuffer(arena, arena->Offset(device_addr), size, *expanded_value);
+            MarkBlocksWritten(device_addr, size);
             return true;
         } else {
             LOG_WARNING(Render_Vulkan, "Unhandled metadata type {}",
@@ -499,10 +783,36 @@ bool BufferCache::SynchronizeMemoryFromImage(const Buffer* arena, VAddr device_a
         return false;
     }
     Image& image = texture_cache.GetImage(image_id);
-    ASSERT_MSG(device_addr == image.info.guest_address,
-               "Texel buffer aliases image subresources {:x} : {:x}", device_addr,
-               image.info.guest_address);
-    const u64 arena_offset = arena->Offset(device_addr);
+    const VAddr image_addr = image.info.guest_address;
+    const u64 image_size = image.info.guest_size;
+    const VAddr image_end = image_addr + image_size;
+    const VAddr buffer_end = device_addr + size;
+    if (image_size == 0 || image_end < image_addr || buffer_end < device_addr ||
+        device_addr >= image_end || buffer_end <= image_addr) {
+        LOG_WARNING(Render_Vulkan,
+                    "Texel buffer range does not overlap its aliased image: "
+                    "buffer={:#x}+{:#x}, image={:#x}+{:#x}",
+                    device_addr, size, image_addr, image_size);
+        return false;
+    }
+
+    // A formatted buffer can partially overlap a GPU-written image: it may start inside the image
+    // and extend beyond it, or cover the image from an earlier address. Tile the full authoritative
+    // image back to its original guest range so the overlapping bytes are coherent while the
+    // buffer-only prefix or suffix keeps its existing contents. Shifting the image to device_addr
+    // would corrupt the byte layout seen by the shader.
+    const VAddr arena_end = arena->cpu_addr + arena->size_bytes;
+    if (image_addr < arena->cpu_addr || image_end > arena_end) {
+        LOG_WARNING(Render_Vulkan,
+                    "Aliased image does not fit the buffer arena: image={:#x}+{:#x}, "
+                    "arena={:#x}+{:#x}",
+                    image_addr, image_size, arena->cpu_addr, arena->size_bytes);
+        return false;
+    }
+    const u64 image_first_block = image_addr >> block_shift;
+    const u64 image_last_block = (image_end - 1) >> block_shift;
+    EnsureResident(arena, image_first_block, image_last_block);
+    const u64 arena_offset = arena->Offset(image_addr);
     boost::container::small_vector<vk::BufferImageCopy, 8> buffer_copies;
     for (u32 mip = 0; mip < image.info.resources.levels; mip++) {
         const auto& mip_info = image.info.mips_layout[mip];
@@ -531,6 +841,7 @@ bool BufferCache::SynchronizeMemoryFromImage(const Buffer* arena, VAddr device_a
     }
     auto& tile_manager = texture_cache.GetTileManager();
     tile_manager.TileImage(image, buffer_copies, arena, arena_offset);
+    MarkBlocksWritten(image_addr, image_size);
     return true;
 }
 

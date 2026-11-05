@@ -26,7 +26,7 @@ public:
 
     void ReinterpretColorAsMsDepth(u32 width, u32 height, u32 num_samples,
                                    vk::Format src_pixel_format, vk::Format dst_pixel_format,
-                                   vk::Image source, vk::Image dest);
+                                   bool src_msaa, vk::Image source, vk::Image dest);
 
     void CopyBetweenMsImages(u32 width, u32 height, u32 num_samples, vk::Format pixel_format,
                              bool src_msaa, vk::Image source, vk::Image dest);
@@ -52,6 +52,7 @@ private:
     vk::UniquePipelineLayout single_texture_pl_layout;
     vk::ShaderModule fs_tri_vertex;
     vk::ShaderModule color_to_ms_depth_frag;
+    vk::ShaderModule color_ms_to_ms_depth_frag;
     vk::ShaderModule src_msaa_copy_frag;
     vk::ShaderModule src_non_msaa_copy_frag;
 

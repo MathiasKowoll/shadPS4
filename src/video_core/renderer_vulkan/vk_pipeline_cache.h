@@ -78,6 +78,7 @@ public:
 
     void WarmUp();
     void Sync();
+    void CompilePreloadedPipelines();
 
     bool LoadComputePipeline(Serialization::Archive& ar);
     bool LoadGraphicsPipeline(Serialization::Archive& ar);
@@ -105,6 +106,8 @@ private:
     bool RefreshGraphicsKey();
     bool RefreshGraphicsStages();
     bool RefreshComputeKey();
+    bool CheckSampledImageArrayLimits(std::span<const Shader::Info* const> stages,
+                                      u32 color_attachments) const;
 
     void DumpShader(std::span<const u32> code, u64 hash, Shader::HwStage stage, size_t perm_idx,
                     std::string_view ext);
@@ -139,6 +142,27 @@ private:
     GraphicsPipelineKey graphics_key{};
     ComputePipelineKey compute_key{};
     u32 num_new_pipelines{}; // new pipelines added to the cache since the game start
+
+    struct GraphicsPreload {
+        GraphicsPipelineKey key;
+        std::array<const Shader::Info*, MaxShaderStages> infos;
+        std::array<Shader::RuntimeInfo, MaxShaderStages> runtime_infos;
+        std::array<vk::ShaderModule, MaxShaderStages> modules;
+        std::optional<Shader::Gcn::FetchShaderData> fetch_shader;
+        GraphicsPipeline::SerializationSupport sdata;
+        std::unique_ptr<GraphicsPipeline> pipeline;
+    };
+    struct ComputePreload {
+        ComputePipelineKey key;
+        const Shader::Info* info;
+        vk::ShaderModule module;
+        ComputePipeline::SerializationSupport sdata;
+        std::unique_ptr<ComputePipeline> pipeline;
+    };
+    std::vector<std::unique_ptr<GraphicsPreload>> graphics_preloads;
+    std::vector<std::unique_ptr<ComputePreload>> compute_preloads;
+    u32 preload_threads{1};
+    bool defer_preload_compile{};
 
     // Only if Config::collectShadersForDebug()
     tsl::robin_map<vk::ShaderModule,

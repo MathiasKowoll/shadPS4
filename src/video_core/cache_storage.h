@@ -8,6 +8,7 @@
 #include "common/types.h"
 
 #include <functional>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -32,6 +33,10 @@ public:
         return opened;
     }
     void FinishPreload();
+    /// Renames a closed cache to <serial>.<tag> so the next Open starts an empty one.
+    bool SetAside(std::string_view tag);
+    /// Moves a cache set aside under <tag> back into place. The database must be closed.
+    bool Restore(std::string_view tag);
 
     bool Save(BlobType type, const std::string& name, std::vector<u8>&& data);
     bool Save(BlobType type, const std::string& name, std::vector<u32>&& data);

@@ -18,6 +18,7 @@ endforeach()
 set(TEST_TARGETS
     shadps4_settings_test
     shadps4_ngs2_test
+    shadps4_json_test
     shadps4_gcn_test
 )
 
@@ -71,6 +72,26 @@ set(NGS2_TEST_SOURCES
 
     # Tests
     test_ngs2.cpp
+)
+
+set(JSON_TEST_SOURCES
+    ${CMAKE_SOURCE_DIR}/src/core/libraries/json/json.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/emulator_settings.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/emulator_state.cpp
+    ${CMAKE_SOURCE_DIR}/src/common/path_util.cpp
+    ${CMAKE_SOURCE_DIR}/src/common/assert.cpp
+    ${CMAKE_SOURCE_DIR}/src/common/error.cpp
+    ${CMAKE_SOURCE_DIR}/src/common/string_util.cpp
+    ${CMAKE_SOURCE_DIR}/src/common/logging/classes.cpp
+    ${CMAKE_SOURCE_DIR}/src/common/logging/log.cpp
+    stubs/common_stub.cpp
+    stubs/core_stub.cpp
+    stubs/signals_stub.cpp
+    stubs/file_sys_stub.cpp
+    stubs/scm_rev_stub.cpp
+    stubs/sdl_stub.cpp
+    stubs/loader_stub.cpp
+    test_json.cpp
 )
 set(GCN_TEST_SOURCES
     # Under test
@@ -171,6 +192,7 @@ set(GCN_TEST_SOURCES
 
 add_executable(shadps4_settings_test ${SETTINGS_TEST_SOURCES})
 add_executable(shadps4_ngs2_test ${NGS2_TEST_SOURCES})
+add_executable(shadps4_json_test ${JSON_TEST_SOURCES})
 add_executable(shadps4_gcn_test ${GCN_TEST_SOURCES})
 
 foreach(t ${TEST_TARGETS})
@@ -191,6 +213,14 @@ target_link_libraries(shadps4_settings_test PRIVATE
     spdlog::spdlog
 )
 target_link_libraries(shadps4_ngs2_test PRIVATE
+    GTest::gtest_main
+    fmt::fmt
+    nlohmann_json::nlohmann_json
+    toml11::toml11
+    SDL3::SDL3
+    spdlog::spdlog
+)
+target_link_libraries(shadps4_json_test PRIVATE
     GTest::gtest_main
     fmt::fmt
     nlohmann_json::nlohmann_json

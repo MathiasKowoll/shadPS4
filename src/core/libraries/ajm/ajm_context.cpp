@@ -82,15 +82,8 @@ void AjmContext::ProcessBatch(u32 id, std::span<AjmJob> jobs) {
         if (job.instance_id == AJM_INSTANCE_STATISTICS) {
             AjmInstanceStatistics::Getinstance().ExecuteJob(job);
         } else {
-            std::shared_ptr<AjmInstance> instance;
-            {
-                std::shared_lock lock(instances_mutex);
-                auto* p_instance = instances.Get(job.instance_id & INSTANCE_ID_MASK);
-                ASSERT_MSG(p_instance != nullptr, "Attempting to execute job on null instance");
-                instance = *p_instance;
-            }
-
-            instance->ExecuteJob(job);
+            ASSERT_MSG(job.instance != nullptr, "Attempting to execute job on null instance");
+            job.instance->ExecuteJob(job);
         }
     }
 }
@@ -138,6 +131,19 @@ int AjmContext::BatchStartBuffer(u8* p_batch, u32 batch_size, const int priority
     }
 
     const auto batch_info = AjmBatch::FromBatchBuffer({p_batch, batch_size});
+    {
+        std::shared_lock lock(instances_mutex);
+        for (auto& job : batch_info->jobs) {
+            if (job.instance_id == AJM_INSTANCE_STATISTICS) {
+                continue;
+            }
+            auto* instance = instances.Get(job.instance_id & INSTANCE_ID_MASK);
+            if (instance == nullptr) {
+                return ORBIS_AJM_ERROR_INVALID_INSTANCE;
+            }
+            job.instance = *instance;
+        }
+    }
     std::optional<u32> batch_id;
     {
         std::unique_lock guard(batches_mutex);

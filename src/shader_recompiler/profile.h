@@ -14,6 +14,7 @@ struct Profile {
     u32 supported_spirv{0x00010000};
     u32 subgroup_size{};
     u32 sparse_page_shift{};
+    u32 max_sampled_image_descriptors{};
     bool support_int8{};
     bool support_int16{};
     bool support_int64{};
@@ -43,6 +44,7 @@ struct Profile {
     bool supports_workgroup_explicit_memory_layout{};
     bool supports_amd_shader_explicit_vertex_parameter{};
     bool supports_fragment_shader_barycentric{};
+    bool supports_sampled_image_array_non_uniform_indexing{};
     bool supports_shader_subgroup_clock{};
     bool has_broken_spirv_clamp{};
     bool lower_left_origin_mode{};
@@ -53,7 +55,12 @@ struct Profile {
     bool needs_clip_distance_emulation{};
     bool supports_shader_stencil_export{};
     bool fast_shader_math{};
+    bool direct_memory_access{};
     bool support_bda{};
+    /// Bit per HwStage whose control-flow table reads go through a raw window. FS only is 1, the
+    /// value the former bool stored, so existing caches stay compatible. Bit 7 selects windows
+    /// sized from the SRT metadata and leaves sharp (T#/V#/S#) reads alone.
+    u8 dynamic_srt_stages{};
 
     bool operator==(const Profile&) const = default;
 };

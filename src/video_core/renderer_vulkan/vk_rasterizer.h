@@ -3,6 +3,11 @@
 
 #pragma once
 
+#include <atomic>
+#include <deque>
+#include <mutex>
+
+#include "common/unique_function.h"
 #include "common/recursive_lock.h"
 #include "common/shared_first_mutex.h"
 #include "video_core/buffer_cache/buffer_cache.h"
@@ -69,6 +74,7 @@ public:
     void ScopedMarkerInsertColor(const std::string_view& str, const u32 color,
                                  bool from_guest = false);
 
+    void WatchWrite(VAddr address, u64 size, std::string_view source) const;
     void FillBuffer(VAddr address, u32 num_bytes, u32 value, bool is_gds);
     void CopyBuffer(VAddr dst, VAddr src, u32 num_bytes, bool dst_gds, bool src_gds);
     u32 ReadDataFromGds(u32 gsd_offset);
@@ -83,6 +89,9 @@ public:
     void Finish();
     void OnSubmit();
     void OnFence();
+    /// OnFence for an end-of-pipe event: records pending image readbacks and runs `signal`, now
+    /// or once the readbacks it depends on have reached guest memory. Signals run in order.
+    void SignalFenceAfterReadbacks(Common::UniqueFunction<void>&& signal);
 
     PipelineCache& GetPipelineCache() {
         return pipeline_cache;
@@ -121,6 +130,13 @@ private:
     void BindBuffers(const Shader::Info& stage, Shader::Backend::Bindings& binding,
                      Shader::PushData& push_data);
     void BindTextures(const Shader::Info& stage, Shader::Backend::Bindings& binding);
+    bool BeginTraceCommand();
+    void EndTraceCommand();
+    void DumpTraceImages(std::span<const VideoCore::ImageId> images, std::string_view label);
+    void TraceGraphicsCommand(const GraphicsPipeline* pipeline, std::string_view kind, u32 count,
+                              u32 instances);
+    void TraceComputeCommand(const ComputePipeline* pipeline, std::string_view kind, u32 x, u32 y,
+                             u32 z);
     bool BindResources(const Pipeline* pipeline);
 
     void BindVertexBuffers(const GraphicsPipeline* pipeline);
@@ -158,11 +174,11 @@ private:
         VideoCore::ImageId image_id;
         VideoCore::TextureCache::ImageDesc desc;
     };
-    std::array<ImageBinding, Shader::NUM_IMAGES> image_bindings;
+    std::vector<ImageBinding> image_bindings;
     std::array<ImageBinding, AmdGpu::NUM_COLOR_BUFFERS> cb_descs;
     ImageBinding db_desc;
 
-    boost::container::static_vector<vk::DescriptorImageInfo, Shader::NUM_IMAGES> image_infos;
+    std::vector<vk::DescriptorImageInfo> image_infos;
     boost::container::static_vector<vk::DescriptorBufferInfo, Shader::NUM_BUFFERS> buffer_infos;
 
     struct BoundBuffer {
@@ -180,6 +196,17 @@ private:
 
     bool attachment_feedback_loop{};
     bool needs_barrier{};
+
+    /// End-of-pipe signals waiting for an asynchronous readback batch to land in guest memory.
+    struct HeldSignal {
+        u64 readback_batch; ///< Batch that must have landed first, 0 when none.
+        Common::UniqueFunction<void> signal;
+    };
+    void ReleaseHeldSignals();
+    std::mutex held_signals_mutex;
+    std::deque<HeldSignal> held_signals;
+    std::atomic<u64> readback_batches_landed{};
+    u64 readback_batches_issued{};
 };
 
 } // namespace Vulkan

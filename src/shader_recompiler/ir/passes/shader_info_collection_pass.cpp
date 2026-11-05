@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-#include "core/emulator_settings.h"
 #include "shader_recompiler/ir/program.h"
 #include "shader_recompiler/profile.h"
 
@@ -217,7 +216,7 @@ void CollectShaderInfoPass(IR::Program& program, const Profile& profile) {
         }
     }
 
-    if (!EmulatorSettings.IsDirectMemoryAccessEnabled() || !profile.support_bda) {
+    if (!profile.direct_memory_access || !profile.support_bda) {
         info.uses_dma = false;
         info.readconst_types = Info::ReadConstType::None;
     }
@@ -233,7 +232,7 @@ void CollectShaderInfoPass(IR::Program& program, const Profile& profile) {
             .buffer_type = BufferType::FaultBuffer,
             .is_written = true,
         });
-        LOG_ERROR(Render, "Enabling DMA for shader {:#x}", info.pgm_hash);
+        LOG_DEBUG(Render, "Enabling DMA for shader {:#x}", info.pgm_hash);
     }
 }
 

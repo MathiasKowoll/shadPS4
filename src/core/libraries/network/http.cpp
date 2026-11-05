@@ -478,6 +478,16 @@ static const char* HttpMethodName(s32 method) {
     }
 }
 
+static bool TraceHttpNonblock() {
+    const char* value = std::getenv("SHADPS4_HTTP_TRACE_NONBLOCK");
+    return value && value[0] && std::string_view(value) != "0";
+}
+
+static bool TraceHttpSmallBodies() {
+    const char* value = std::getenv("SHADPS4_HTTP_TRACE_SMALL_BODIES");
+    return value && value[0] && std::string_view(value) != "0";
+}
+
 // Dump every effective setting and the merged header list when a request is
 // about to be sent.
 static void LogSendRequestSettings(const HttpRequest& req, int reqId, u64 body_size) {
@@ -888,10 +898,23 @@ static s32 RunRealHttpRequest(const SendRequestPlan& plan_in, HttpResponse& out_
 
         httplib::Headers headers;
         for (const auto& [k, v] : plan.headers) {
+            // The cpp-httplib body overloads add Content-Type from their final
+            // argument. Passing the guest header here as well emits it twice,
+            // which strict servers reject as an unsupported media type.
+            if (!plan.content_type.empty() && HeaderNameMatches(k, "Content-Type") &&
+                (plan.method == ORBIS_HTTP_METHOD_POST || plan.method == ORBIS_HTTP_METHOD_PUT ||
+                 plan.method == ORBIS_HTTP_METHOD_DELETE)) {
+                continue;
+            }
             headers.emplace(k, std::string(TrimHeaderValue(v)));
         }
-        if (plan.settings.accept_encoding_gzip && !game_set_accept_encoding) {
-            headers.emplace("Accept-Encoding", "gzip");
+        if (!game_set_accept_encoding) {
+            // cpp-httplib adds "Accept-Encoding: gzip, deflate" by default when it is built
+            // with zlib support. That must not leak into the guest request: libSceHttp keeps
+            // accepting compressed responses and inflating them as separate settings. If the
+            // guest did not opt in, explicitly request the identity representation.
+            headers.emplace("Accept-Encoding",
+                            plan.settings.accept_encoding_gzip ? "gzip" : "identity");
         }
 
         const char* body_ptr =
@@ -1768,6 +1791,16 @@ int PS4_SYSV_ABI sceHttpSendRequest(int reqId, const void* postData, u64 size) {
         }
     }
 
+    if (TraceHttpSmallBodies() && !plan.body.empty() && plan.body.size() <= 64) {
+        std::string body_hex;
+        body_hex.reserve(plan.body.size() * 2);
+        for (const u8 byte : plan.body) {
+            body_hex += fmt::format("{:02x}", byte);
+        }
+        LOG_INFO(Lib_Http, "reqId={} diagnostic body: {} bytes, hex={}", reqId,
+                 plan.body.size(), body_hex);
+    }
+
     const bool online = EmulatorSettings.IsConnectedToNetwork();
     LOG_INFO(Lib_Http, "reqId={} dispatched to async worker [{} {} {}://{}:{}{}]", reqId,
              online ? "ONLINE" : "OFFLINE", HttpMethodName(plan.method), plan.scheme, plan.host,
@@ -2043,8 +2076,19 @@ int PS4_SYSV_ABI sceHttpsUnloadCert(int libhttpCtxId) {
 
 int PS4_SYSV_ABI sceHttpWaitRequest(OrbisHttpEpollHandle eh, OrbisHttpNBEvent* nbev, int maxevents,
                                     int timeout) {
-    LOG_DEBUG(Lib_Http, "called eh={}, nbev={}, maxevents={}, timeout={}", fmt::ptr(eh),
-              fmt::ptr(nbev), maxevents, timeout);
+    static std::atomic<u32> trace_count = 0;
+    const bool trace_nonblock = TraceHttpNonblock();
+    const u32 trace_index = trace_nonblock ? trace_count.fetch_add(1, std::memory_order_relaxed) : 0;
+    const bool log_this_call = trace_nonblock && trace_index < 256;
+    if (log_this_call) {
+        LOG_INFO(Lib_Http,
+                 "diagnostic wait[{}]: caller={}, eh={}, nbev={}, maxevents={}, timeout={}",
+                 trace_index, fmt::ptr(__builtin_return_address(0)), fmt::ptr(eh), fmt::ptr(nbev),
+                 maxevents, timeout);
+    } else {
+        LOG_DEBUG(Lib_Http, "called eh={}, nbev={}, maxevents={}, timeout={}", fmt::ptr(eh),
+                  fmt::ptr(nbev), maxevents, timeout);
+    }
     std::unique_lock<std::mutex> lock(g_state.m_mutex);
     if (!g_state.inited) {
         LOG_ERROR(Lib_Http, "Not initialized");
@@ -2062,6 +2106,14 @@ int PS4_SYSV_ABI sceHttpWaitRequest(OrbisHttpEpollHandle eh, OrbisHttpNBEvent* n
         return ORBIS_HTTP_ERROR_INVALID_ID;
     }
     auto epoll_ptr = it->second;
+
+    if (log_this_call) {
+        LOG_INFO(Lib_Http,
+                 "diagnostic wait[{}]: initial event fields events={:#x} detail={:#x} id={} "
+                 "userArg={}",
+                 trace_index, nbev[0].events, nbev[0].eventDetail, nbev[0].id,
+                 fmt::ptr(nbev[0].userArg));
+    }
 
     // if the epoll's abort flag is
     // already set, return Aborted immediately without draining or waiting.
@@ -2090,6 +2142,10 @@ int PS4_SYSV_ABI sceHttpWaitRequest(OrbisHttpEpollHandle eh, OrbisHttpNBEvent* n
     // No events queued. Behavior depends on timeout.
     if (timeout == 0) {
         // Poll mode: don't wait, just return 0.
+        if (log_this_call) {
+            LOG_INFO(Lib_Http, "diagnostic wait[{}]: epoll id={} has no queued events; returning 0",
+                     trace_index, epoll_id);
+        }
         return 0;
     }
     if (epoll_ptr->destroyed || g_state.shutting_down.load()) {
@@ -2796,8 +2852,8 @@ int PS4_SYSV_ABI sceHttpGetStatusCode(int reqId, int* statusCode) {
     auto& req = *it->second;
     int wr = WaitForResponseReady(req, lock);
     if (wr == ORBIS_HTTP_ERROR_EAGAIN) {
-        LOG_DEBUG(Lib_Http, "reqId={}: response not yet ready, returning EAGAIN", reqId);
-        return ORBIS_HTTP_ERROR_EAGAIN;
+        LOG_DEBUG(Lib_Http, "reqId={}: response not yet ready, returning BEFORE_SEND", reqId);
+        return ORBIS_HTTP_ERROR_BEFORE_SEND;
     }
     if (wr != ORBIS_OK) {
         LOG_ERROR(Lib_Http, "Wait failed for reqId={}: {:#x}", reqId, static_cast<u32>(wr));

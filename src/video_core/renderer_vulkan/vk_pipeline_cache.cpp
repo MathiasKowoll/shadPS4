@@ -1,9 +1,13 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
+#include <cstdlib>
+#include <chrono>
 #include <ranges>
 
 #include "common/hash.h"
+#include "common/scope_exit.h"
 #include "common/io_file.h"
 #include "common/path_util.h"
 #include "core/debug_state.h"
@@ -28,10 +32,11 @@ using Shader::SwStage;
 
 constexpr static auto SpirvVersion1_6 = 0x00010600U;
 
+constexpr u32 SampledImagePoolSize = 8192;
 constexpr static std::array DescriptorHeapSizes = {
     vk::DescriptorPoolSize{vk::DescriptorType::eUniformBuffer, 512},
     vk::DescriptorPoolSize{vk::DescriptorType::eStorageBuffer, 8192},
-    vk::DescriptorPoolSize{vk::DescriptorType::eSampledImage, 8192},
+    vk::DescriptorPoolSize{vk::DescriptorType::eSampledImage, SampledImagePoolSize},
     vk::DescriptorPoolSize{vk::DescriptorType::eStorageImage, 1024},
     vk::DescriptorPoolSize{vk::DescriptorType::eSampler, 1024},
 };
@@ -281,6 +286,9 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
         .supported_spirv = SpirvVersion1_6,
         .subgroup_size = instance.SubgroupSize(),
         .sparse_page_shift = sparse_page_shift,
+        .max_sampled_image_descriptors =
+            std::min({instance_.GetLimits().maxPerStageDescriptorSampledImages,
+                      instance_.GetLimits().maxDescriptorSetSampledImages, SampledImagePoolSize}),
         .support_int8 = instance.IsShaderInt8Supported(),
         .support_int16 = instance.IsShaderInt16Supported(),
         .support_int64 = instance.IsShaderInt64Supported(),
@@ -318,6 +326,8 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
         .supports_amd_shader_explicit_vertex_parameter =
             instance_.IsAmdShaderExplicitVertexParameterSupported(),
         .supports_fragment_shader_barycentric = instance_.IsFragmentShaderBarycentricSupported(),
+        .supports_sampled_image_array_non_uniform_indexing =
+            instance_.IsSampledImageArrayNonUniformIndexingSupported(),
         .supports_shader_subgroup_clock = instance_.IsShaderSubgroupClockSupported(),
         .needs_manual_interpolation = instance.IsFragmentShaderBarycentricSupported() &&
                                       instance.GetDriverID() == vk::DriverId::eNvidiaProprietary,
@@ -328,7 +338,33 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
         .needs_clip_distance_emulation = instance.GetDriverID() == vk::DriverId::eNvidiaProprietary,
         .supports_shader_stencil_export = instance_.IsShaderStencilExportSupported(),
         .fast_shader_math = EmulatorSettings.IsFastShaderMath(),
+        .direct_memory_access = EmulatorSettings.IsDirectMemoryAccessEnabled(),
         .support_bda = instance_.IsBufferDeviceAddressSupported(),
+        .dynamic_srt_stages = [] -> u8 {
+            if (const char* value = std::getenv("SHADPS4_DYNAMIC_SRT_STAGES");
+                value != nullptr && value[0] != '\0') {
+                const std::string_view list{value};
+                if (list == "all") {
+                    return 0x7f;
+                }
+                constexpr std::array<std::string_view, 7> names{"fs", "vs", "gs", "es",
+                                                                "hs", "ls", "cs"};
+                u8 mask = 0;
+                for (u32 i = 0; i < names.size(); ++i) {
+                    if (list.find(names[i]) != std::string_view::npos) {
+                        mask |= static_cast<u8>(1u << i);
+                    }
+                }
+                if (list.find("v2") != std::string_view::npos) {
+                    mask |= 0x80;
+                }
+                return mask;
+            }
+            // Default: fragment stage with SRT-sized windows (0x81); "fs" (0x01) selects fixed
+            // 64 KB windows.
+            const char* value = std::getenv("SHADPS4_DYNAMIC_SRT_WINDOW");
+            return (value == nullptr || value[0] != '0') ? u8{0x81} : u8{0};
+        }(),
     };
     WarmUp();
 
@@ -340,6 +376,51 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
 
 PipelineCache::~PipelineCache() = default;
 
+bool PipelineCache::CheckSampledImageArrayLimits(std::span<const Shader::Info* const> stages,
+                                                 u32 color_attachments) const {
+    if (!std::ranges::any_of(stages, [](const auto* stage) {
+            return stage && std::ranges::any_of(stage->images, [](const auto& image) {
+                       return image.descriptor_count != 0;
+                   });
+        })) {
+        return true;
+    }
+
+    const auto& limits = instance.GetLimits();
+    u32 set_sampled_images{};
+    for (const auto* stage : stages) {
+        if (!stage) {
+            continue;
+        }
+        u32 sampled_images{};
+        u32 resources = stage->buffers.size();
+        if (stage->sw_stage == SwStage::Fragment) {
+            resources += color_attachments;
+        }
+        for (const auto& image : stage->images) {
+            const u32 count = image.NumBindings(*stage);
+            resources += count;
+            if (!image.is_written) {
+                sampled_images += count;
+            }
+        }
+        if (sampled_images > limits.maxPerStageDescriptorSampledImages ||
+            resources > limits.maxPerStageResources) {
+            LOG_ERROR(Render_Vulkan, "Sampled image arrays exceed the descriptor limits for {}",
+                      u32(stage->sw_stage));
+            return false;
+        }
+        set_sampled_images += sampled_images;
+    }
+
+    if (set_sampled_images > limits.maxDescriptorSetSampledImages ||
+        set_sampled_images > SampledImagePoolSize) {
+        LOG_ERROR(Render_Vulkan, "Sampled image arrays exceed the descriptor set limit");
+        return false;
+    }
+    return true;
+}
+
 const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectParams params) {
     draw_indirect_params = params;
     if (!RefreshGraphicsKey()) {
@@ -347,8 +428,19 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
     }
     const auto [it, is_new] = graphics_pipelines.try_emplace(graphics_key);
     if (is_new) {
+        if (!CheckSampledImageArrayLimits(infos, graphics_key.num_color_attachments)) {
+            return nullptr;
+        }
         const auto pipeline_hash = std::hash<GraphicsPipelineKey>{}(graphics_key);
         LOG_INFO(Render_Vulkan, "Compiling graphics pipeline {:#x}", pipeline_hash);
+        const auto compile_start = std::chrono::steady_clock::now();
+        SCOPE_EXIT {
+            DebugState.AddPerf(DebugStateType::DebugStateImpl::PerfCounter::PipelineCompiles);
+            DebugState.AddPerf(DebugStateType::DebugStateImpl::PerfCounter::PipelineCompileUs,
+                               std::chrono::duration_cast<std::chrono::microseconds>(
+                                   std::chrono::steady_clock::now() - compile_start)
+                                   .count());
+        };
 
         GraphicsPipeline::SerializationSupport sdata{};
         it.value() = std::make_unique<GraphicsPipeline>(
@@ -376,8 +468,19 @@ const ComputePipeline* PipelineCache::GetComputePipeline() {
     }
     const auto [it, is_new] = compute_pipelines.try_emplace(compute_key);
     if (is_new) {
+        if (!CheckSampledImageArrayLimits(std::span{infos}.first<1>(), 0)) {
+            return nullptr;
+        }
         const auto pipeline_hash = std::hash<ComputePipelineKey>{}(compute_key);
         LOG_INFO(Render_Vulkan, "Compiling compute pipeline {:#x}", pipeline_hash);
+        const auto compile_start = std::chrono::steady_clock::now();
+        SCOPE_EXIT {
+            DebugState.AddPerf(DebugStateType::DebugStateImpl::PerfCounter::PipelineCompiles);
+            DebugState.AddPerf(DebugStateType::DebugStateImpl::PerfCounter::PipelineCompileUs,
+                               std::chrono::duration_cast<std::chrono::microseconds>(
+                                   std::chrono::steady_clock::now() - compile_start)
+                                   .count());
+        };
 
         ComputePipeline::SerializationSupport sdata{};
         it.value() = std::make_unique<ComputePipeline>(instance, scheduler, desc_heap, profile,

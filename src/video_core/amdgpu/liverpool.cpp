@@ -740,15 +740,21 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb) {
             }
             case PM4ItOpcode::EventWriteEop: {
                 const auto* event_eop = reinterpret_cast<const PM4CmdEventWriteEop*>(header);
+                // The packet is copied: a deferred signal can run after the guest recycles the
+                // command buffer that holds it.
+                auto signal = [packet = *event_eop] {
+                    packet.SignalFence(
+                        [](void* address, u64 data, u32 num_bytes) {
+                            auto* memory = Core::Memory::Instance();
+                            ASSERT(memory->TryWriteBacking(address, &data, num_bytes));
+                        },
+                        [] { Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxEop); });
+                };
                 if (rasterizer) {
-                    rasterizer->OnFence();
+                    rasterizer->SignalFenceAfterReadbacks(std::move(signal));
+                } else {
+                    signal();
                 }
-                event_eop->SignalFence(
-                    [](void* address, u64 data, u32 num_bytes) {
-                        auto* memory = Core::Memory::Instance();
-                        ASSERT(memory->TryWriteBacking(address, &data, num_bytes));
-                    },
-                    [] { Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxEop); });
                 break;
             }
             case PM4ItOpcode::DmaData: {
@@ -793,6 +799,10 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb) {
                 ASSERT(write_data->dst_sel.Value() == 2 || write_data->dst_sel.Value() == 5);
                 const u32 data_size = (header->type3.count.Value() - 2) * 4;
                 u64* address = write_data->Address<u64*>();
+                if (rasterizer) {
+                    rasterizer->WatchWrite(reinterpret_cast<VAddr>(address), data_size,
+                                           "gfx WriteData");
+                }
                 if (!write_data->wr_one_addr.Value()) {
                     if (rasterizer) {
                         rasterizer->OnFence();
@@ -1183,6 +1193,10 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
             const auto* write_data = reinterpret_cast<const PM4CmdWriteData*>(header);
             ASSERT(write_data->dst_sel.Value() == 2 || write_data->dst_sel.Value() == 5);
             const u32 data_size = (header->type3.count.Value() - 2) * 4;
+            if (rasterizer) {
+                rasterizer->WatchWrite(reinterpret_cast<VAddr>(write_data->Address<void*>()), data_size,
+                                       "asc WriteData");
+            }
             if (!write_data->wr_one_addr.Value()) {
                 if (rasterizer) {
                     rasterizer->OnFence();

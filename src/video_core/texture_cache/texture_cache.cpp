@@ -2,6 +2,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <atomic>
+#include <unordered_set>
+#include <cstdlib>
+#include <filesystem>
 #include <limits>
 #include <xxhash.h>
 
@@ -9,6 +13,7 @@
 #include "common/debug.h"
 #include "common/div_ceil.h"
 #include "common/hash.h"
+#include "core/debug_state.h"
 #include "core/emulator_settings.h"
 #include "core/memory.h"
 #include "video_core/buffer_cache/buffer_cache.h"
@@ -27,8 +32,57 @@ static constexpr u32 MAX_IMAGES = std::numeric_limits<u16>::max();
 static constexpr u32 MAX_IMAGE_VIEWS = std::numeric_limits<u16>::max();
 static constexpr u32 MAX_SAMPLERS = std::numeric_limits<u16>::max();
 
+// SHADPS4_HASH_LOG=1 logs the first few hundred eviction hashes and hash resets (diagnostics).
+static bool HashLogBudget() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("SHADPS4_HASH_LOG");
+        return value != nullptr && value[0] != '\0' && value[0] != '0';
+    }();
+    static std::atomic<u32> lines{0};
+    return enabled && lines.fetch_add(1, std::memory_order_relaxed) < 600;
+}
+
+// A/B switch for the eviction-hash skip: SHADPS4_HASH_ALWAYS=1 restores the old behavior, and
+// SHADPS4_HASH_ALWAYS_FILE=<path> does so while that file exists (checked every 4096 calls).
+static bool HashAlways() {
+    static const bool env_on = [] {
+        const char* value = std::getenv("SHADPS4_HASH_ALWAYS");
+        return value != nullptr && value[0] == '1';
+    }();
+    static const char* const file = std::getenv("SHADPS4_HASH_ALWAYS_FILE");
+    if (env_on || file == nullptr || file[0] == '\0') {
+        return env_on;
+    }
+    static std::atomic<u32> calls{0};
+    static std::atomic<bool> state{false};
+    if ((calls.fetch_add(1, std::memory_order_relaxed) & 4095) == 0) {
+        std::error_code ec;
+        state.store(std::filesystem::exists(file, ec), std::memory_order_relaxed);
+    }
+    return state.load(std::memory_order_relaxed);
+}
+
+// Which GPU-written images are copied back to guest memory when readback_linear_images is on.
+// Upstream copies every untiled image; FC26 only needs its 1x1 luminance ring, and copying its
+// untiled UI renders (lineup cards) back every frame both costs time and, done asynchronously,
+// lands over newer data. SHADPS4_READBACK_ANY_LINEAR=1 restores the upstream rule.
+static bool WantsReadback(const ImageInfo& info) {
+    static const bool any_linear = [] {
+        const char* value = std::getenv("SHADPS4_READBACK_ANY_LINEAR");
+        return value != nullptr && value[0] == '1';
+    }();
+    if (any_linear) {
+        return !info.props.is_tiled || info.size.width <= 8;
+    }
+    return info.size.width <= 8 && info.size.height <= 8;
+}
+
+// gpu_hash value for an image whose memory took a buffer write that was not hashed.
+static constexpr u64 UnhashedGpuWrite = 1;
+
 static u64 HashBackingMemory(VAddr virtual_addr, u64 size) {
     static constexpr std::array<u8, Core::GUEST_PAGE_SIZE> zeros{};
+    DebugState.AddPerf(DebugStateType::DebugStateImpl::PerfCounter::ImageHashBytes, size);
     auto* state = XXH3_createState();
     const auto& backing_pages = Core::Memory::Instance()->GetAddressSpace().BackingPages();
     XXH3_64bits_reset(state);
@@ -93,15 +147,40 @@ TextureCache::TextureCache(const Vulkan::Instance& instance_, Vulkan::Scheduler&
 
 TextureCache::~TextureCache() = default;
 
+// SHADPS4_ASYNC_IMAGE_READBACK=1: let readback copies complete with the GPU work and write guest
+// memory from a priority pending operation, instead of draining the GPU on every submit and
+// fence. Fences that the guest could use to read the result are deferred behind those writes
+// (Rasterizer::DeferFenceAfterReadback), so the guest never observes the fence before the data.
+static bool AsyncImageReadback() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("SHADPS4_ASYNC_IMAGE_READBACK");
+        return value != nullptr && value[0] == '1';
+    }();
+    return enabled;
+}
+
+bool TextureCache::HasAsyncReadbacks() {
+    if (!AsyncImageReadback()) {
+        return false;
+    }
+    std::unique_lock lk{download_images_mutex};
+    return !download_images.empty();
+}
+
 void TextureCache::ProcessDownloadImages() {
     std::unique_lock lk{download_images_mutex};
     if (download_images.empty()) {
         return;
     }
+    const bool async_readback = AsyncImageReadback();
     for (const ImageId image_id : download_images) {
-        DownloadImageMemory(image_id);
+        DownloadImageMemory(image_id, async_readback ? DownloadMemoryFlags::Priority
+                                                     : DownloadMemoryFlags::None);
     }
     download_images.clear();
+    if (async_readback) {
+        return;
+    }
     scheduler.Finish();
     scheduler.PopPendingOperations();
 }
@@ -152,6 +231,19 @@ void TextureCache::DownloadImageMemory(ImageId image_id, DownloadMemoryFlags fla
         runtime.GetStagingPool().Request(copy_size, MemoryType::HostCached, 16, !is_sync);
 
     tile_manager.TileImage(image, buffer_copies, download.buffer, download.offset);
+
+    // SHADPS4_READBACK_POISON=1 (diagnostics): fill an asynchronous readback target with a bright
+    // value until the real data lands, so a guest read that comes too early shows on screen.
+    static const bool poison = [] {
+        const char* value = std::getenv("SHADPS4_READBACK_POISON");
+        return value != nullptr && value[0] == '1';
+    }();
+    if (poison && is_priority && copy_size <= 4096) {
+        std::array<u32, 1024> fill;
+        fill.fill(0x4f004f00u);
+        Core::Memory::Instance()->TryWriteBacking(std::bit_cast<u8*>(image_addr), fill.data(),
+                                                  copy_size);
+    }
 
     const auto write_data = [this, image_addr, copy_size, download, discard_buffer_cache, is_sync] {
         download.Invalidate();
@@ -244,7 +336,36 @@ void TextureCache::InvalidateMemoryFromGPU(VAddr address, size_t max_size) {
 
 void TextureCache::MarkAsMaybeGpuDirty(VAddr addr, size_t size) {
     ForEachImageInRegion(addr, size, [&](ImageId image_id, Image& image) {
+        // The hash is only read when the image is evicted with valid GPU data. A CpuDirty or
+        // GpuDirty image gets valid data back only through a refresh, which resets the hash, or
+        // through a whole-image GPU copy that is newer than this write, so hashing it now is
+        // wasted work. FC26 rewrites aliased images through storage buffers every frame and paid
+        // for several megabytes of hashing per frame here.
+        if (!HashAlways() &&
+            True(image.flags & (ImageFlagBits::CpuDirty | ImageFlagBits::GpuDirty))) {
+            DebugState.AddPerf(DebugStateType::DebugStateImpl::PerfCounter::ImageHashSkips);
+            // A partial GPU copy can clean the image without a refresh. Without a hash, eviction
+            // would download it over this newer buffer write; the sentinel never matches a real
+            // hash, so eviction reads the buffer data back and deletes the image instead, which is
+            // what the old code did whenever the write changed bytes.
+            if (image.gpu_hash == 0) {
+                image.gpu_hash = UnhashedGpuWrite;
+            }
+            return;
+        }
+        // A clean image keeps its hash. Giving it the sentinel (tried 2026-11-05) made eviction
+        // delete images whose bytes the buffer write left unchanged instead of downloading them,
+        // and FC26 lost GPU-made textures: LED boards in pieces, an untextured ball.
         if (image.gpu_hash == 0) {
+            if (HashLogBudget()) {
+                LOG_INFO(Render_Vulkan,
+                         "HashLog frame={} hash image={:#x}+{:#x} {}x{} {} flags={:#x} by "
+                         "write={:#x}+{:#x}",
+                         DebugState.GetFrameNum(), image.info.guest_address,
+                         image.info.guest_size, image.info.size.width, image.info.size.height,
+                         vk::to_string(image.info.pixel_format), static_cast<u32>(image.flags),
+                         addr, size);
+            }
             // Read backing pages directly, without faulting through the guest readback path.
             image.gpu_hash = HashBackingMemory(image.info.guest_address, image.info.guest_size);
         }
@@ -403,6 +524,26 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
                 FreeImage(cache_image_id);
             }
             return {merged_image_id, -1, -1};
+        }
+
+        // Same format, tiling, pitch and extent, and the cached image already holds the requested
+        // subresources, but the request computes a larger guest size. FC26 binds mip 0 of an
+        // 11-mip 1920x1080 B10G11R11 image as a 1-mip render target (0xba3500 vs 0x1000000
+        // bytes) and aborted here. Use a view of the cached image.
+        if (image_info.type == cache_image.info.type && image_info.pitch == cache_image.info.pitch &&
+            image_info.size == cache_image.info.size &&
+            cache_image.info.resources.Contains(image_info.resources)) {
+            // FC26 renders every mip of such an image each frame; log each address once.
+            static std::unordered_set<VAddr> logged;
+            if (logged.insert(image_info.guest_address).second) {
+                LOG_WARNING(Render_Vulkan,
+                            "Image at {:#x} requested with {} levels and size {:#x}, using the "
+                            "cached one with {} levels and size {:#x}",
+                            image_info.guest_address, image_info.resources.levels,
+                            image_info.guest_size, cache_image.info.resources.levels,
+                            cache_image.info.guest_size);
+            }
+            return {merged_image_id ? merged_image_id : cache_image_id, -1, -1};
         }
 
         // Enhanced debug logging for unreachable case
@@ -720,8 +861,7 @@ ImageView& TextureCache::FindTexture(ImageId image_id, const ImageDesc& desc) {
     Image& image = slot_images[image_id];
     if (desc.type == BindingType::Storage) {
         image.flags |= ImageFlagBits::GpuModified;
-        if (readback_linear_images && (!image.info.props.is_tiled || image.info.size.width <= 8) &&
-            image.info.guest_address != 0) {
+        if (readback_linear_images && WantsReadback(image.info) && image.info.guest_address != 0) {
             std::unique_lock lk{download_images_mutex};
             download_images.emplace(image_id);
         }
@@ -758,7 +898,7 @@ void TextureCache::UnregisterMeta(VAddr address, u64 owner_uid) {
 ImageView& TextureCache::FindRenderTarget(ImageId image_id, const ImageDesc& desc) {
     Image& image = slot_images[image_id];
     image.flags |= ImageFlagBits::GpuModified;
-    if (readback_linear_images && (!image.info.props.is_tiled || image.info.size.width <= 8)) {
+    if (readback_linear_images && WantsReadback(image.info)) {
         std::unique_lock lk{download_images_mutex};
         download_images.emplace(image_id);
     }
@@ -880,6 +1020,11 @@ void TextureCache::RefreshImage(Image& image) {
         image.cpu_hash = hash;
     }
 
+    if (image.gpu_hash != 0 && HashLogBudget()) {
+        LOG_INFO(Render_Vulkan, "HashLog frame={} reset image={:#x}+{:#x} flags={:#x}",
+                 DebugState.GetFrameNum(), image.info.guest_address, image.info.guest_size,
+                 static_cast<u32>(image.flags));
+    }
     image.gpu_hash = 0;
 
     const u32 num_layers = image.info.resources.layers;
@@ -1116,6 +1261,7 @@ void TextureCache::GarbageCollectImages() {
             return false;
         }
         --num_deletions;
+        DebugState.AddPerf(DebugStateType::DebugStateImpl::PerfCounter::GcEvictions);
         const auto image_id = slot_images.GetSlotId(image);
         if (download) {
             UntrackImage(image_id);
@@ -1154,6 +1300,8 @@ void TextureCache::GarbageCollectImages() {
         image_lru_cache.ForEachItemBelow(gc_tick - ticks_to_destroy, clean_up);
     }
 
+    DebugState.AddPerf(DebugStateType::DebugStateImpl::PerfCounter::GcHashChecks,
+                       maybe_download.size());
     if (!maybe_download.empty()) {
         // wait for memory reads to finish
         scheduler.Finish();
@@ -1170,6 +1318,8 @@ void TextureCache::GarbageCollectImages() {
         }
     }
 
+    DebugState.AddPerf(DebugStateType::DebugStateImpl::PerfCounter::GcDownloads,
+                       download_queue.size());
     for (const auto& image_id : download_queue) {
         buffer_cache.ReadEdgeImagePages(slot_images[image_id]);
     }

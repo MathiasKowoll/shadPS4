@@ -1,7 +1,11 @@
 // SPDX-FileCopyrightText: Copyright 2025 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
+#include <filesystem>
+#include <chrono>
 #include "common/assert.h"
+#include "core/debug_state.h"
 #include "common/debug.h"
 #include "common/thread.h"
 #include "imgui/renderer/texture_manager.h"
@@ -28,13 +32,59 @@ Scheduler::~Scheduler() {
 #endif
 }
 
+/// SHADPS4_PASS_DIAG=1 (diagnostics): what differs when a new render state ends an open pass.
+static void CountStateChange(const RenderState& old_state, const RenderState& new_state) {
+    static const bool enabled = [] {
+        const char* value = std::getenv("SHADPS4_PASS_DIAG");
+        return value != nullptr && value[0] == '1';
+    }();
+    if (!enabled) {
+        return;
+    }
+    static std::array<u32, 5> counts{};
+    static u32 total{};
+    bool views = old_state.num_color_attachments != new_state.num_color_attachments ||
+                 old_state.depth_stencil_attachment.image_view !=
+                     new_state.depth_stencil_attachment.image_view;
+    bool layouts = old_state.depth_stencil_attachment.image_layout !=
+                   new_state.depth_stencil_attachment.image_layout;
+    bool clears = old_state.depth_stencil_attachment.is_clear !=
+                      new_state.depth_stencil_attachment.is_clear ||
+                  old_state.depth_stencil_attachment.clear_value !=
+                      new_state.depth_stencil_attachment.clear_value;
+    for (u32 i = 0; i < std::min(old_state.num_color_attachments, new_state.num_color_attachments);
+         ++i) {
+        const auto& a = old_state.color_attachments[i];
+        const auto& b = new_state.color_attachments[i];
+        views |= a.image_view != b.image_view;
+        layouts |= a.image_layout != b.image_layout;
+        clears |= a.is_clear != b.is_clear || a.clear_value != b.clear_value;
+    }
+    const bool size = old_state.width != new_state.width || old_state.height != new_state.height ||
+                      old_state.num_layers != new_state.num_layers;
+    // 0 views, 1 size only, 2 layouts only, 3 clears only, 4 other
+    const u32 kind = views ? 0 : size ? 1 : layouts ? 2 : clears ? 3 : 4;
+    ++counts[kind];
+    if (++total == 3000) {
+        LOG_INFO(Render_Vulkan,
+                 "Pass state changes: views={} size={} layouts={} clears={} other={}", counts[0],
+                 counts[1], counts[2], counts[3], counts[4]);
+        counts.fill(0);
+        total = 0;
+    }
+}
+
 void Scheduler::BeginRendering(const RenderState& new_state) {
     if (is_rendering && render_state == new_state) {
         return;
     }
+    if (is_rendering) {
+        CountStateChange(render_state, new_state);
+    }
     EndRendering();
     is_rendering = true;
     render_state = new_state;
+    DebugState.AddPerf(DebugStateType::DebugStateImpl::PerfCounter::RenderPassBegins);
 
     std::array<vk::RenderingAttachmentInfo, 8> color_attachments;
     for (u32 i = 0; i < render_state.num_color_attachments; ++i) {
@@ -87,6 +137,7 @@ void Scheduler::EndRendering() {
     if (!is_rendering) {
         return;
     }
+    DebugState.AddPassEnd(__builtin_return_address(0));
     is_rendering = false;
     CommandBuffer().endRendering();
 }
@@ -101,6 +152,19 @@ vk::CommandBuffer Scheduler::UploadCommandBuffer() {
     };
     upload_cmdbuf = command_pool.Commit();
     Check(upload_cmdbuf.begin(begin_info));
+    // Uploads recorded here run before the session's primary command buffer, after all earlier
+    // submissions. Order them after earlier work that may still read or write the destinations.
+    const vk::MemoryBarrier2 before = {
+        .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+        .srcAccessMask = vk::AccessFlagBits2::eMemoryWrite | vk::AccessFlagBits2::eMemoryRead,
+        .dstStageMask = vk::PipelineStageFlagBits2::eAllTransfer,
+        .dstAccessMask =
+            vk::AccessFlagBits2::eTransferWrite | vk::AccessFlagBits2::eTransferRead,
+    };
+    upload_cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+        .memoryBarrierCount = 1,
+        .pMemoryBarriers = &before,
+    });
     return upload_cmdbuf;
 }
 
@@ -128,7 +192,16 @@ void Scheduler::Wait(u64 tick) {
         SubmitInfo info{};
         Flush(info);
     }
+    if (work_semaphore.IsFree(tick)) {
+        return;
+    }
+    const auto wait_start = std::chrono::steady_clock::now();
     work_semaphore.Wait(tick);
+    DebugState.AddPerf(DebugStateType::DebugStateImpl::PerfCounter::GpuWaits);
+    DebugState.AddPerf(DebugStateType::DebugStateImpl::PerfCounter::GpuWaitUs,
+                       std::chrono::duration_cast<std::chrono::microseconds>(
+                           std::chrono::steady_clock::now() - wait_start)
+                           .count());
 }
 
 void Scheduler::PopPendingOperations() {
@@ -148,6 +221,7 @@ void Scheduler::BeginSession() {
     EndSession();
 
     auto& session = sessions.emplace_back();
+    ++session_serial;
 
     const vk::CommandBufferBeginInfo begin_info = {
         .flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit,
@@ -179,6 +253,17 @@ void Scheduler::EndSession() {
 
     const auto& session = sessions.back();
     if (session.upload) {
+        // Make the uploads visible to everything the primary command buffer does.
+        const vk::MemoryBarrier2 after = {
+            .srcStageMask = vk::PipelineStageFlagBits2::eAllTransfer,
+            .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
+            .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+            .dstAccessMask = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
+        };
+        session.upload.pipelineBarrier2(vk::DependencyInfo{
+            .memoryBarrierCount = 1,
+            .pMemoryBarriers = &after,
+        });
         Check(session.upload.end());
     }
 

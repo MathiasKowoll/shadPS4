@@ -89,6 +89,8 @@ public:
     virtual ~GameController() = default;
     void ConnectController(SDL_Gamepad* pad);
     void DisconnectController();
+    /// Connects a virtual pad for player 1 when no physical one is attached (input scripts).
+    void ConnectScripted();
 
     State ReadState();
     int ReadStates(State* states, int states_num);

@@ -1,6 +1,14 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <chrono>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <sstream>
+#include <string>
+#include <thread>
+#include <unordered_map>
 #include <SDL3/SDL_events.h>
 #include <SDL3/SDL_hints.h>
 #include <SDL3/SDL_init.h>
@@ -339,11 +347,81 @@ void WindowSDL::WaitEvent() {
     }
 }
 
+static void RunInputScript(Input::GameController* controller, std::string path) {
+    using Libraries::Pad::OrbisPadButtonDataOffset;
+    static const std::unordered_map<std::string_view, OrbisPadButtonDataOffset> buttons = {
+        {"cross", OrbisPadButtonDataOffset::Cross},
+        {"circle", OrbisPadButtonDataOffset::Circle},
+        {"square", OrbisPadButtonDataOffset::Square},
+        {"triangle", OrbisPadButtonDataOffset::Triangle},
+        {"up", OrbisPadButtonDataOffset::Up},
+        {"down", OrbisPadButtonDataOffset::Down},
+        {"left", OrbisPadButtonDataOffset::Left},
+        {"right", OrbisPadButtonDataOffset::Right},
+        {"options", OrbisPadButtonDataOffset::Options},
+        {"l1", OrbisPadButtonDataOffset::L1},
+        {"r1", OrbisPadButtonDataOffset::R1},
+        {"l2", OrbisPadButtonDataOffset::L2},
+        {"r2", OrbisPadButtonDataOffset::R2},
+        {"l3", OrbisPadButtonDataOffset::L3},
+        {"r3", OrbisPadButtonDataOffset::R3},
+        {"touchpad", OrbisPadButtonDataOffset::TouchPad},
+    };
+    const auto sleep_ms = [](u32 ms) { std::this_thread::sleep_for(std::chrono::milliseconds(ms)); };
+    while (true) {
+        std::error_code ec;
+        if (!std::filesystem::exists(path, ec)) {
+            sleep_ms(50);
+            continue;
+        }
+        std::vector<std::string> lines;
+        {
+            std::ifstream file{path};
+            for (std::string line; std::getline(file, line);) {
+                lines.push_back(line);
+            }
+        }
+        std::filesystem::remove(path, ec);
+        for (const auto& line : lines) {
+            std::istringstream stream{line};
+            std::string name;
+            u32 hold = 120;
+            u32 wait = 400;
+            if (!(stream >> name)) {
+                continue;
+            }
+            if (name == "wait") {
+                stream >> hold;
+                sleep_ms(hold);
+                continue;
+            }
+            if (name == "connect") {
+                controller->ConnectScripted();
+                continue;
+            }
+            stream >> hold >> wait;
+            const auto it = buttons.find(name);
+            if (it == buttons.end()) {
+                LOG_WARNING(Input, "Unknown scripted button {}", name);
+                continue;
+            }
+            LOG_INFO(Input, "Scripted button {} hold={}ms", name, hold);
+            controller->Button(it->second, true);
+            sleep_ms(hold);
+            controller->Button(it->second, false);
+            sleep_ms(wait);
+        }
+    }
+}
+
 void WindowSDL::InitTimers() {
     for (int i = 0; i < 4; ++i) {
         SDL_AddTimer(4, &PollController, controllers[i]);
     }
     SDL_AddTimer(33, Input::MousePolling, (void*)controllers[0]);
+    if (const char* script = std::getenv("SHADPS4_INPUT_SCRIPT"); script && script[0] != '\0') {
+        std::thread(RunInputScript, controllers[0], std::string{script}).detach();
+    }
 }
 
 void WindowSDL::RequestKeyboard() {

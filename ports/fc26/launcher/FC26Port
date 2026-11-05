@@ -1,0 +1,13 @@
+#!/bin/bash
+
+set -euo pipefail
+
+contents_dir=$(cd -- "$(dirname -- "$0")/.." && pwd)
+runner=$(/usr/libexec/PlistBuddy -c 'Print :FC26RunnerPath' "$contents_dir/Info.plist")
+
+if [[ ! -x $runner ]]; then
+    osascript -e 'display alert "EA SPORTS FC 26 Port" message "The launcher is not connected to ports/fc26/scripts/run.sh. Reinstall it from the FC26 port worktree." as critical'
+    exit 1
+fi
+
+exec "$runner"

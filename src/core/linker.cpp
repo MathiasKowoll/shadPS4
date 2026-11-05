@@ -1,10 +1,22 @@
 // SPDX-FileCopyrightText: Copyright 2025-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <atomic>
+#include <cctype>
+#include <cstdlib>
+#include <deque>
+#include <memory>
+#include <mutex>
+#include <string_view>
+#include <vector>
+
+#include <xbyak/xbyak.h>
+
 #include "common/alignment.h"
 #include "common/arch.h"
 #include "common/assert.h"
 #include "common/elf_info.h"
+#include "common/io_file.h"
 #include "common/logging/formatter.h"
 #include "common/logging/log.h"
 #include "common/path_util.h"
@@ -33,6 +45,178 @@
 #endif
 
 namespace Core {
+
+namespace {
+
+struct ImportTraceRule {
+    std::string importer;
+    std::string library;
+};
+
+struct ImportTraceEntry {
+    std::string importer;
+    std::string library;
+    std::string nid;
+    VAddr target{};
+    std::atomic<u64> calls{};
+    std::unique_ptr<Xbyak::CodeGenerator> code;
+};
+
+std::mutex import_trace_mutex;
+std::deque<std::unique_ptr<ImportTraceEntry>> import_trace_entries;
+
+std::string_view TrimTraceToken(std::string_view value) {
+    while (!value.empty() && std::isspace(static_cast<unsigned char>(value.front()))) {
+        value.remove_prefix(1);
+    }
+    while (!value.empty() && std::isspace(static_cast<unsigned char>(value.back()))) {
+        value.remove_suffix(1);
+    }
+    return value;
+}
+
+const std::vector<ImportTraceRule>& GetImportTraceRules() {
+    static const std::vector<ImportTraceRule> rules = [] {
+        std::vector<ImportTraceRule> result;
+        const char* environment = std::getenv("SHADPS4_TRACE_IMPORTS");
+        if (!environment || environment[0] == '\0') {
+            return result;
+        }
+
+        std::string_view remaining{environment};
+        while (!remaining.empty()) {
+            const size_t separator = remaining.find(';');
+            const std::string_view token = TrimTraceToken(remaining.substr(0, separator));
+            const size_t arrow = token.find("->");
+            if (arrow != std::string_view::npos) {
+                const std::string_view importer = TrimTraceToken(token.substr(0, arrow));
+                const std::string_view library = TrimTraceToken(token.substr(arrow + 2));
+                if (!importer.empty() && !library.empty()) {
+                    result.push_back({std::string{importer}, std::string{library}});
+                }
+            }
+            if (separator == std::string_view::npos) {
+                break;
+            }
+            remaining.remove_prefix(separator + 1);
+        }
+        return result;
+    }();
+    return rules;
+}
+
+bool TraceNameMatches(std::string_view rule, std::string_view actual) {
+    if (rule == "*" || rule == actual) {
+        return true;
+    }
+    const size_t extension = actual.find_last_of('.');
+    return extension != std::string_view::npos && rule == actual.substr(0, extension);
+}
+
+bool ShouldTraceImport(std::string_view importer, std::string_view library) {
+    return std::ranges::any_of(GetImportTraceRules(), [&](const ImportTraceRule& rule) {
+        return TraceNameMatches(rule.importer, importer) && TraceNameMatches(rule.library, library);
+    });
+}
+
+void PS4_SYSV_ABI LogTracedImport(u64 index, VAddr return_address, u64 arg0, u64 arg1, u64 arg2,
+                                  u64 arg3) {
+    ImportTraceEntry* entry{};
+    {
+        std::scoped_lock lock{import_trace_mutex};
+        if (index >= import_trace_entries.size()) {
+            return;
+        }
+        entry = import_trace_entries[index].get();
+    }
+
+    const u64 call = entry->calls.fetch_add(1, std::memory_order_relaxed) + 1;
+    const bool power_of_two = (call & (call - 1)) == 0;
+    if (call <= 16 || power_of_two || call % 600 == 0) {
+        LOG_INFO(Core_ImportTrace,
+                 "Import trace: {} -> {} nid={} call={} return={:#x} target={:#x} args=[{:#x}, "
+                 "{:#x}, {:#x}, {:#x}] thread={}",
+                 entry->importer, entry->library, entry->nid, call, return_address, entry->target,
+                 arg0, arg1, arg2, arg3, Common::GetCurrentThreadName());
+    }
+}
+
+VAddr TraceImport(std::string_view importer, const Loader::SymbolResolver& symbol, VAddr target) {
+    if (!target || symbol.type != Loader::SymbolType::Function ||
+        !ShouldTraceImport(importer, symbol.library)) {
+        return target;
+    }
+
+    std::scoped_lock lock{import_trace_mutex};
+    for (const auto& existing : import_trace_entries) {
+        if (existing->importer == importer && existing->library == symbol.library &&
+            existing->nid == symbol.name && existing->target == target) {
+            return reinterpret_cast<VAddr>(existing->code->getCode());
+        }
+    }
+
+    auto entry = std::make_unique<ImportTraceEntry>();
+    entry->importer = importer;
+    entry->library = symbol.library;
+    entry->nid = symbol.name;
+    entry->target = target;
+    entry->code = std::make_unique<Xbyak::CodeGenerator>(512, Xbyak::AutoGrow);
+    auto& code = *entry->code;
+
+    // Preserve every caller-saved integer and SIMD register so tracing does not alter the guest
+    // ABI. On SysV x86-64 the original stack is 8 mod 16 at function entry; nine pushes and the
+    // 256-byte SIMD save area leave it correctly aligned for the host logging call.
+    code.push(code.rax);
+    code.push(code.rcx);
+    code.push(code.rdx);
+    code.push(code.rsi);
+    code.push(code.rdi);
+    code.push(code.r8);
+    code.push(code.r9);
+    code.push(code.r10);
+    code.push(code.r11);
+    constexpr int SimdSaveSize = 16 * 16;
+    constexpr int GprSaveSize = 9 * 8;
+    code.sub(code.rsp, SimdSaveSize);
+    for (int i = 0; i < 16; ++i) {
+        code.movdqu(code.ptr[code.rsp + i * 16], Xbyak::Xmm{i});
+    }
+
+    const u64 index = import_trace_entries.size();
+    code.mov(code.rdx, code.ptr[code.rsp + SimdSaveSize + 4 * 8]);
+    code.mov(code.rcx, code.ptr[code.rsp + SimdSaveSize + 5 * 8]);
+    code.mov(code.r8, code.ptr[code.rsp + SimdSaveSize + 6 * 8]);
+    code.mov(code.r9, code.ptr[code.rsp + SimdSaveSize + 7 * 8]);
+    code.mov(code.rdi, index);
+    code.mov(code.rsi, code.ptr[code.rsp + SimdSaveSize + GprSaveSize]);
+    code.mov(code.rax, reinterpret_cast<VAddr>(&LogTracedImport));
+    code.call(code.rax);
+
+    for (int i = 0; i < 16; ++i) {
+        code.movdqu(Xbyak::Xmm{i}, code.ptr[code.rsp + i * 16]);
+    }
+    code.add(code.rsp, SimdSaveSize);
+    code.pop(code.r11);
+    code.pop(code.r10);
+    code.pop(code.r9);
+    code.pop(code.r8);
+    code.pop(code.rdi);
+    code.pop(code.rsi);
+    code.pop(code.rdx);
+    code.pop(code.rcx);
+    code.pop(code.rax);
+    code.jmp(code.ptr[code.rip]);
+    code.dq(target);
+    code.ready();
+
+    const VAddr wrapper = reinterpret_cast<VAddr>(code.getCode());
+    LOG_INFO(Core_ImportTrace, "Installed import trace: {} -> {} nid={} target={:#x} wrapper={:#x}",
+             entry->importer, entry->library, entry->nid, entry->target, wrapper);
+    import_trace_entries.push_back(std::move(entry));
+    return wrapper;
+}
+
+} // namespace
 
 static PS4_SYSV_ABI void ProgramExitFunc() {
     LOG_ERROR(Core_Linker, "Exit function called");
@@ -419,6 +603,7 @@ bool Linker::Resolve(const std::string& name, Loader::SymbolType sym_type, Modul
     const auto* record = m_hle_symbols.FindSymbol(sr);
     if (record) {
         *return_info = *record;
+        return_info->virtual_address = TraceImport(m->name, sr, return_info->virtual_address);
         Core::Devtools::Widget::ModuleList::AddModule(sr.library);
         return true;
     }
@@ -435,6 +620,7 @@ bool Linker::Resolve(const std::string& name, Loader::SymbolType sym_type, Modul
         record = mod->export_sym.FindSymbol(sr);
         if (record) {
             *return_info = *record;
+            return_info->virtual_address = TraceImport(m->name, sr, return_info->virtual_address);
             return true;
         }
     }
@@ -450,6 +636,7 @@ bool Linker::Resolve(const std::string& name, Loader::SymbolType sym_type, Modul
         return_info->virtual_address = AeroLib::GetStub(sr.name.c_str());
         return_info->symbol.nidName = "Unknown !!!";
     }
+    return_info->virtual_address = TraceImport(m->name, sr, return_info->virtual_address);
     if (library->name != "libc" && library->name != "libSceFios2") {
         LOG_WARNING(Core_Linker, "Linker: Stub resolved {} as {} (lib: {}, mod: {})", sr.name,
                     return_info->symbol.nidName, library->name, module->name);
@@ -466,6 +653,9 @@ bool Linker::Resolve(const std::string& name, Loader::SymbolType sym_type, Modul
 
 void* Linker::TlsGetAddr(u64 module_index, u64 offset) {
     std::scoped_lock lk{mutex};
+
+    ASSERT_MSG(module_index > 0 && module_index <= max_tls_index,
+               "Invalid TLS module index {} (maximum {})", module_index, max_tls_index);
 
     DtvEntry* dtv_table = GetTcbBase()->tcb_dtv;
     if (dtv_table[0].counter != dtv_generation_counter) {
@@ -485,7 +675,16 @@ void* Linker::TlsGetAddr(u64 module_index, u64 offset) {
     }
 
     u8* addr = dtv_table[module_index + 1].pointer;
-    Module* module = m_modules[module_index - 1].get();
+    Module* module = nullptr;
+    for (const auto& candidate : m_modules) {
+        if (candidate->tls.modid == module_index) {
+            module = candidate.get();
+            break;
+        }
+    }
+    ASSERT_MSG(module, "No module owns TLS index {}", module_index);
+    ASSERT_MSG(offset < module->tls.image_size, "TLS offset {} exceeds module {} image size {}",
+               offset, module->name, module->tls.image_size);
     if (!addr) {
         // Module was just loaded by above code. Allocate TLS block for it.
         const u32 init_image_size = module->tls.init_image_size;
@@ -553,6 +752,23 @@ void Linker::DebugDump() {
         std::filesystem::create_directory(filepath);
         module->import_sym.DebugDump(filepath / "imports.txt");
         module->export_sym.DebugDump(filepath / "exports.txt");
+        Common::FS::IOFile relocations{filepath / "relocations.txt",
+                                       Common::FS::FileAccessMode::Create,
+                                       Common::FS::FileType::TextFile};
+        const u32 num_relocs = module->dynamic_info.relocation_table_size / sizeof(elf_relocation);
+        module->ForEachRelocation([&](const elf_relocation* rel, u32 index, bool is_jump) {
+            const u32 bit_index = (is_jump ? num_relocs : 0) + index;
+            const u32 symbol_index = rel->GetSymbol();
+            const auto& symbol = module->dynamic_info.symbol_table[symbol_index];
+            const char* name = module->dynamic_info.str_table + symbol.st_name;
+            const VAddr target = module->GetBaseAddress() + rel->rel_offset;
+            u64 value{};
+            std::memcpy(&value, reinterpret_cast<const void*>(target), sizeof(value));
+            relocations.WriteString(
+                fmt::format("0x{:<16x} 0x{:<16x} {:<5} {:<10} {:<8} {}\n", target, value,
+                            rel->GetType(), module->TestRelaBit(bit_index) ? "resolved" : "stubbed",
+                            is_jump ? "jump" : "regular", name));
+        });
         if (elf.IsSelfFile()) {
             elf.SelfHeaderDebugDump(filepath / "selfHeader.txt");
             elf.SelfSegHeaderDebugDump(filepath / "selfSegHeaders.txt");

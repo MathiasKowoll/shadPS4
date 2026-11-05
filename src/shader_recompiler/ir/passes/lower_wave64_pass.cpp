@@ -121,8 +121,9 @@ void LowerWave64BallotPass(IR::Program& program, const RuntimeInfo& runtime_info
             if (is_uniform) {
                 worklist.push_back(&inst);
             } else {
-                LOG_WARNING(Render_Recompiler, "{} instruction in non uniform control flow",
-                            inst.GetOpcode());
+                LOG_WARNING(Render_Recompiler,
+                            "{} instruction in non uniform control flow in {} shader {:#x}",
+                            inst.GetOpcode(), program.info.hw_stage, program.info.pgm_hash);
             }
         };
         for (IR::Inst& inst : block->Instructions()) {

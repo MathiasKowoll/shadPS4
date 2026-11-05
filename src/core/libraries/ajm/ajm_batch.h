@@ -19,6 +19,8 @@
 
 namespace Libraries::Ajm {
 
+class AjmInstance;
+
 struct AjmJob {
     struct Input {
         std::optional<AjmSidebandInitParameters> init_params;
@@ -43,6 +45,7 @@ struct AjmJob {
     };
 
     u32 instance_id{};
+    std::shared_ptr<AjmInstance> instance;
     AjmJobFlags flags{};
     Input input;
     Output output;

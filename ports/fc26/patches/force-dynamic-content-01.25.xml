@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<Patch>
+    <TitleID>
+        <ID>CUSA52342</ID>
+    </TitleID>
+    <Metadata Title="EA SPORTS FC 26"
+              Name="Diagnostic: force dynamic content initialization"
+              Note="Diagnostic only. Bypasses the DYNAMICCONTENT_ACTIVE false branch to identify why menu media initialization is skipped."
+              Author="fc26-port"
+              PatchVer="1.0"
+              AppVer="01.25"
+              AppElf="eboot.bin"
+              isEnabled="true">
+        <PatchList>
+            <Line Type="mask"
+                  Address="45 85 FF 0F 84 47 03 00 00 48 8B 3D"
+                  Offset="3"
+                  Value="909090909090"/>
+            <Line Type="mask"
+                  Address="48 8D 35 C4 52 27 02 31 D2 48 89 DF"
+                  Offset="7"
+                  Value="B201"/>
+        </PatchList>
+    </Metadata>
+</Patch>

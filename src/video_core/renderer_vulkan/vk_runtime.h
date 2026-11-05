@@ -38,6 +38,10 @@ public:
                     std::span<const vk::BufferCopy> copies);
 
     void FillBuffer(const VideoCore::Buffer* dst, u64 offset, u64 size, u32 value);
+    /// Records a copy in the session's upload command buffer, which runs before the primary one.
+    /// The caller guarantees no command of the current session touches the destination ranges.
+    void CopyBufferBeforeSession(const VideoCore::Buffer* src, const VideoCore::Buffer* dst,
+                                 std::span<const vk::BufferCopy> copies);
 
     void InlineData(VideoCore::Buffer* dst, u64 offset, u32 value);
 

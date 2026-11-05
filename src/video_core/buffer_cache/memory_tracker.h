@@ -62,6 +62,43 @@ public:
         });
     }
 
+    /// Marks the pages of a range that hold no GPU-modified data and are still write-protected as
+    /// CPU modified, so later guest writes to them do not fault. Pages with GPU data are skipped:
+    /// an upload of them would overwrite that data. Returns the number of pages released.
+    u64 ReleaseCleanPages(VAddr cpu_addr, u64 size) noexcept {
+        u64 released = 0;
+        IteratePages(cpu_addr, size, [&released](RegionManager* manager, u64 offset, u64 size) {
+            const auto bounds = manager->GetBounds(offset, size);
+            manager->Lock(bounds);
+            u64 run_start = 0;
+            u64 run_size = 0;
+            const auto flush = [&] {
+                if (run_size != 0) {
+                    manager->template ChangeRegionState<StateOp::Set, StateOp::None, false>(
+                        run_start, run_size);
+                    released += run_size / BYTES_PER_PAGE;
+                    run_size = 0;
+                }
+            };
+            for (u64 page = offset; page < offset + size; page += BYTES_PER_PAGE) {
+                const bool clean =
+                    !manager->template IsRegionModified<Type::GPU>(page, BYTES_PER_PAGE) &&
+                    !manager->template IsRegionModified<Type::CPU>(page, BYTES_PER_PAGE);
+                if (!clean) {
+                    flush();
+                    continue;
+                }
+                if (run_size == 0) {
+                    run_start = page;
+                }
+                run_size += BYTES_PER_PAGE;
+            }
+            flush();
+            manager->Unlock(bounds);
+        });
+        return released;
+    }
+
     /// Removes all protection from a page and ensures GPU data has been flushed if requested
     void InvalidateRegion(VAddr cpu_addr, u64 size, auto&& on_flush) noexcept {
         if (readbacks_mode == GpuReadbacksMode::Disabled) {

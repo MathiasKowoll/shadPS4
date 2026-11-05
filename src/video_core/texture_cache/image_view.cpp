@@ -117,6 +117,15 @@ ImageView::ImageView(const Vulkan::Instance& instance, const ImageViewInfo& info
         format = image.info.pixel_format;
         aspect = vk::ImageAspectFlagBits::eStencil;
     }
+    if (!IsVulkanFormatCompatible(image.info.pixel_format, format) &&
+        IsVulkanFormatCompatible(format, image.info.pixel_format)) {
+        LOG_WARNING(Render_Vulkan,
+                    "Compressed image view {} is using uncompressed backing {} (image format {}, "
+                    "guest {:#x}:{:#x})",
+                    vk::to_string(format), vk::to_string(image.backing->image.image_ci.format),
+                    vk::to_string(image.info.pixel_format), image.info.guest_address,
+                    image.info.guest_size);
+    }
 
     const auto components = info.mapping == AmdGpu::IdentityMapping
                                 ? vk::ComponentMapping{}

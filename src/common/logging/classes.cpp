@@ -21,6 +21,8 @@ std::string_view NameOf(Class log_class) {
         return "Core";
     case Class::Core_Linker:
         return "Core.Linker";
+    case Class::Core_ImportTrace:
+        return "Core.ImportTrace";
     case Class::Core_Devices:
         return "Core.Devices";
     case Class::Config:
@@ -133,6 +135,8 @@ std::string_view NameOf(Class log_class) {
         return "Lib.PlayGoDialog";
     case Class::Lib_Random:
         return "Lib.Random";
+    case Class::Lib_Json:
+        return "Lib.Json";
     case Class::Lib_Usbd:
         return "Lib.Usbd";
     case Class::Lib_Ajm:

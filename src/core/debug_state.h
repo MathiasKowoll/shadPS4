@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <array>
+
 #include <atomic>
 #include <mutex>
 #include <shared_mutex>
@@ -150,6 +152,78 @@ class DebugStateImpl {
     std::atomic<float> draw_call_count_avg = 0.0f;
     std::atomic_int32_t dispatch_count = 0;
     std::atomic<float> dispatch_count_avg = 0.0f;
+
+public:
+    enum class PerfCounter : u32 {
+        PipelineCompiles,
+        PipelineCompileUs,
+        GpuWaits,
+        GpuWaitUs,
+        CpuInvalidations,
+        Downloads,
+        UploadBytes,
+        ImageHashBytes,
+        ImageHashSkips,
+        GcEvictions,
+        GcDownloads,
+        GcHashChecks,
+        DirectDownloads,
+        DirectDownloadsNoWait,
+        ReleasedPages,
+        RenderPassBegins,
+        CopySplits,
+        DeferredUploads,
+        Count,
+    };
+
+    void AddPerf(PerfCounter counter, u64 value = 1) noexcept {
+        perf_counters[static_cast<u32>(counter)].fetch_add(value, std::memory_order_relaxed);
+    }
+
+    u64 TakePerf(PerfCounter counter) noexcept {
+        return perf_counters[static_cast<u32>(counter)].exchange(0, std::memory_order_relaxed);
+    }
+
+    // Render pass ends, bucketed by the return address of the EndRendering call (diagnostics).
+    static constexpr u32 PassEndBuckets = 1024;
+    void AddPassEnd(const void* caller) noexcept {
+        const u64 address = reinterpret_cast<u64>(caller);
+        const u32 index = static_cast<u32>((address ^ (address >> 10)) & (PassEndBuckets - 1));
+        pass_end_count[index].fetch_add(1, std::memory_order_relaxed);
+        pass_end_site[index].store(address, std::memory_order_relaxed);
+    }
+    template <typename Func>
+    void TakePassEnds(Func&& func) noexcept {
+        for (u32 i = 0; i < PassEndBuckets; ++i) {
+            if (const u32 count = pass_end_count[i].exchange(0, std::memory_order_relaxed)) {
+                func(pass_end_site[i].load(std::memory_order_relaxed), count);
+            }
+        }
+    }
+
+    // CPU write faults on GPU-tracked memory, bucketed by 64 KB region (diagnostics only).
+    static constexpr u32 FaultBuckets = 4096;
+    void AddFault(u64 addr) noexcept {
+        const u64 region = addr >> 16;
+        const u32 index = static_cast<u32>((region ^ (region >> 12)) & (FaultBuckets - 1));
+        fault_count[index].fetch_add(1, std::memory_order_relaxed);
+        fault_region[index].store(region, std::memory_order_relaxed);
+    }
+    template <typename Func>
+    void TakeFaults(Func&& func) noexcept {
+        for (u32 i = 0; i < FaultBuckets; ++i) {
+            if (const u32 count = fault_count[i].exchange(0, std::memory_order_relaxed)) {
+                func(fault_region[i].load(std::memory_order_relaxed) << 16, count);
+            }
+        }
+    }
+
+private:
+    std::array<std::atomic_uint64_t, static_cast<u32>(PerfCounter::Count)> perf_counters{};
+    std::array<std::atomic_uint32_t, FaultBuckets> fault_count{};
+    std::array<std::atomic_uint32_t, PassEndBuckets> pass_end_count{};
+    std::array<std::atomic_uint64_t, PassEndBuckets> pass_end_site{};
+    std::array<std::atomic_uint64_t, FaultBuckets> fault_region{};
 
     s32 gnm_frame_dump_request_count = -1;
     std::unordered_map<size_t, FrameDump*> waiting_reg_dumps;

@@ -9,12 +9,14 @@
 #include <SDL3/SDL.h>
 
 #include "common/memory_patcher.h"
+#include "common/singleton.h"
 #include "common/thread.h"
 #include "common/types.h"
 #include "core/debug_state.h"
 #include "core/debugger.h"
 #include "core/emulator_settings.h"
 #include "core/emulator_state.h"
+#include "core/linker.h"
 #include "core/libraries/audio/audioout.h"
 #include "input/input_handler.h"
 #include "sdl_window.h"
@@ -61,6 +63,8 @@ extern std::unique_ptr<Vulkan::Presenter> presenter;
  *   - RESUME: resume the game execution
  *   - STOP: stop and quit the emulator
  *   - TOGGLE_FULLSCREEN: enable / disable fullscreen
+ *   - DUMP_MODULES: write the currently loaded modules and their symbols to the log directory
+ *   - INPUT_KEYBOARD(key: number, down: number): enqueue an SDL keyboard event
  * - OUTPUT CMD:
  *   - RESTART(argn: number, argv: ...string): Request restart of the emulator, must call STOP
  **/
@@ -150,6 +154,17 @@ void IPC::InputLoop() {
             SDL_Event event;
             SDL_memset(&event, 0, sizeof(event));
             event.type = SDL_EVENT_TOGGLE_FULLSCREEN;
+            SDL_PushEvent(&event);
+        } else if (cmd == "DUMP_MODULES") {
+            Common::Singleton<Core::Linker>::Instance()->DebugDump();
+        } else if (cmd == "INPUT_KEYBOARD") {
+            const auto key = static_cast<SDL_Keycode>(next_u64());
+            const bool down = next_u64() != 0;
+            SDL_Event event;
+            SDL_memset(&event, 0, sizeof(event));
+            event.type = down ? SDL_EVENT_KEY_DOWN : SDL_EVENT_KEY_UP;
+            event.key.key = key;
+            event.key.down = down;
             SDL_PushEvent(&event);
         } else if (cmd == "ADJUST_VOLUME") {
             int value = static_cast<int>(next_u64());

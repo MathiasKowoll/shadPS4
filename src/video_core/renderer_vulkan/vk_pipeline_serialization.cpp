@@ -1,6 +1,13 @@
 // SPDX-FileCopyrightText: Copyright 2025-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
+#include <atomic>
+#include <cstddef>
+#include <cstdlib>
+#include <thread>
+#include <xxhash.h>
+
 #include "common/serdes.h"
 #include "core/emulator_settings.h"
 #include "shader_recompiler/frontend/fetch_shader.h"
@@ -13,7 +20,7 @@
 namespace Serialization {
 /* You should increment versions below once corresponding serialization scheme is changed. */
 static constexpr u32 ShaderBinaryVersion = 12u;
-static constexpr u32 ShaderMetaVersion = 6u;
+static constexpr u32 ShaderMetaVersion = 7u;
 static constexpr u32 PipelineKeyVersion = 3u;
 } // namespace Serialization
 
@@ -156,12 +163,28 @@ bool PipelineCache::LoadComputePipeline(Serialization::Archive& ar) {
         return false;
     }
 
-    const auto [it, is_new] = compute_pipelines.try_emplace(compute_key);
-    ASSERT(is_new);
+    if (!CheckSampledImageArrayLimits(std::span{infos}.first<1>(), 0)) {
+        infos.fill(nullptr);
+        modules.fill(nullptr);
+        fetch_shader = nullptr;
+        return false;
+    }
 
-    it.value() =
-        std::make_unique<ComputePipeline>(instance, scheduler, desc_heap, profile, *pipeline_cache,
-                                          compute_key, *infos[0], modules[0], sdata, true);
+    if (defer_preload_compile) {
+        ASSERT(!compute_pipelines.contains(compute_key));
+        compute_preloads.push_back(std::make_unique<ComputePreload>(ComputePreload{
+            .key = compute_key,
+            .info = infos[0],
+            .module = modules[0],
+            .sdata = sdata,
+        }));
+    } else {
+        const auto [it, is_new] = compute_pipelines.try_emplace(compute_key);
+        ASSERT(is_new);
+        it.value() = std::make_unique<ComputePipeline>(instance, scheduler, desc_heap, profile,
+                                                       *pipeline_cache, compute_key, *infos[0],
+                                                       modules[0], sdata, true);
+    }
 
     infos.fill(nullptr);
     modules.fill(nullptr);
@@ -231,12 +254,30 @@ bool PipelineCache::LoadGraphicsPipeline(Serialization::Archive& ar) {
         }
     }
 
-    const auto [it, is_new] = graphics_pipelines.try_emplace(graphics_key);
-    ASSERT(is_new);
+    if (!CheckSampledImageArrayLimits(infos, graphics_key.num_color_attachments)) {
+        infos.fill(nullptr);
+        modules.fill(nullptr);
+        fetch_shader = nullptr;
+        return false;
+    }
 
-    it.value() = std::make_unique<GraphicsPipeline>(
-        instance, scheduler, desc_heap, profile, graphics_key, *pipeline_cache, infos,
-        runtime_infos, fetch_shader, modules, sdata, true);
+    if (defer_preload_compile) {
+        ASSERT(!graphics_pipelines.contains(graphics_key));
+        graphics_preloads.push_back(std::make_unique<GraphicsPreload>(GraphicsPreload{
+            .key = graphics_key,
+            .infos = infos,
+            .runtime_infos = runtime_infos,
+            .modules = modules,
+            .fetch_shader = fetch_shader ? std::optional{*fetch_shader} : std::nullopt,
+            .sdata = sdata,
+        }));
+    } else {
+        const auto [it, is_new] = graphics_pipelines.try_emplace(graphics_key);
+        ASSERT(is_new);
+        it.value() = std::make_unique<GraphicsPipeline>(
+            instance, scheduler, desc_heap, profile, graphics_key, *pipeline_cache, infos,
+            runtime_infos, fetch_shader, modules, sdata, true);
+    }
 
     infos.fill(nullptr);
     modules.fill(nullptr);
@@ -306,36 +347,87 @@ void PipelineCache::WarmUp() {
         return;
     }
 
-    Storage::DataBase::Instance().Open();
+    auto& database = Storage::DataBase::Instance();
+    database.Open();
+
+    // A new cache records the profile first; everything compiled afterwards is appended to it.
+    const auto start_cache = [&] {
+        database.FinishPreload();
+        std::vector<u8> data(sizeof(profile));
+        std::memcpy(data.data(), &profile, sizeof(profile));
+        database.Save(Storage::BlobType::ShaderProfile, "profile", std::move(data));
+    };
+    // An incompatible cache used to be ignored for the whole run, so nothing compiled in it was
+    // ever saved and every later run compiled again. Each profile now keeps its own archive:
+    // the current one is set aside under its profile tag and the one kept for this profile, if
+    // any, is moved back. The tag hashes the profile fields, not the trailing padding.
+    static constexpr size_t ProfileFieldBytes =
+        offsetof(Shader::Profile, dynamic_srt_stages) + sizeof(Shader::Profile::dynamic_srt_stages);
+    const auto profile_tag = [](const void* data, size_t size) {
+        return fmt::format("profile-{:016x}",
+                           XXH3_64bits(data, std::min(size, ProfileFieldBytes)));
+    };
+    // Returns false when the old archive could not be moved; the database is then left closed for
+    // this run (nothing is saved), as before, rather than appending to an archive of another profile.
+    bool cache_usable = true;
+    const auto swap_cache = [&](const std::vector<u8>& old_profile) {
+        database.Close();
+        if (!database.SetAside(profile_tag(old_profile.data(), old_profile.size()))) {
+            cache_usable = false;
+            return false;
+        }
+        const bool restored = database.Restore(profile_tag(&profile, sizeof(profile)));
+        database.Open();
+        return restored;
+    };
 
     // Check if cache is compatible
-    std::vector<u8> profile_data{};
-    Storage::DataBase::Instance().Load(Storage::BlobType::ShaderProfile, "profile", profile_data);
-    if (profile_data.empty()) {
-        Storage::DataBase::Instance().FinishPreload();
+    for (u32 attempt = 0;; ++attempt) {
+        std::vector<u8> profile_data{};
+        database.Load(Storage::BlobType::ShaderProfile, "profile", profile_data);
+        if (profile_data.empty()) {
+            start_cache();
+            return;
+        }
+        if (profile_data.size() == sizeof(Shader::Profile)) {
+            Shader::Profile cached_profile{};
+            std::memcpy(&cached_profile, profile_data.data(), sizeof(cached_profile));
+            if (cached_profile == profile) {
+                break;
+            }
+        }
+        LOG_WARNING(Render, "Pipeline cache was built for another profile ({} bytes)",
+                    profile_data.size());
+        if (attempt > 0 || !swap_cache(profile_data)) {
+            if (!cache_usable) {
+                LOG_ERROR(Render, "Pipeline cache left closed for this run");
+                return;
+            }
+            if (attempt > 0) {
+                database.Close();
+                if (!database.SetAside(profile_tag(profile_data.data(), profile_data.size()))) {
+                    LOG_ERROR(Render, "Pipeline cache left closed for this run");
+                    return;
+                }
+                database.Open();
+            }
+            LOG_WARNING(Render, "Starting a new pipeline cache for this profile");
+            start_cache();
+            return;
+        }
+    }
 
-        profile_data.resize(sizeof(profile));
-        std::memcpy(profile_data.data(), &profile, sizeof(profile));
-        Storage::DataBase::Instance().Save(Storage::BlobType::ShaderProfile, "profile",
-                                           std::move(profile_data));
-        return;
+    // KosmicKrisp aborts while lowering descriptors when DMA pipelines are created concurrently,
+    // so those caches keep the sequential path.
+    preload_threads = profile.direct_memory_access
+                          ? 1u
+                          : std::clamp<u32>(std::thread::hardware_concurrency(), 1u, 16u);
+    if (const char* value = std::getenv("SHADPS4_PRELOAD_THREADS");
+        value != nullptr && value[0] != '\0') {
+        preload_threads =
+            std::clamp<u32>(static_cast<u32>(std::strtoul(value, nullptr, 10)), 1u, 64u);
     }
-    if (profile_data.size() != sizeof(Shader::Profile)) {
-        LOG_WARNING(Render,
-                    "Pipeline cache profile has unexpected size ({} != {}). Ignoring the cache",
-                    profile_data.size(), sizeof(Shader::Profile));
-        Storage::DataBase::Instance().Close();
-        return;
-    }
-
-    Shader::Profile cached_profile{};
-    std::memcpy(&cached_profile, profile_data.data(), sizeof(cached_profile));
-    if (cached_profile != profile) {
-        LOG_WARNING(Render,
-                    "Pipeline cache isn't compatible with current system. Ignoring the cache");
-        Storage::DataBase::Instance().Close();
-        return;
-    }
+    defer_preload_compile = preload_threads > 1;
 
     u32 num_pipelines{};
     u32 num_total_pipelines{};
@@ -368,6 +460,8 @@ void PipelineCache::WarmUp() {
             }
         });
 
+    CompilePreloadedPipelines();
+
     LOG_INFO(Render, "Preloaded {} pipelines", num_pipelines);
     if (num_total_pipelines > num_pipelines) {
         LOG_WARNING(Render, "{} stale pipelines were found. Consider re-generating the cache",
@@ -375,6 +469,52 @@ void PipelineCache::WarmUp() {
     }
 
     Storage::DataBase::Instance().FinishPreload();
+}
+
+void PipelineCache::CompilePreloadedPipelines() {
+    const size_t num_graphics = graphics_preloads.size();
+    const size_t num_total = num_graphics + compute_preloads.size();
+    std::atomic<size_t> next{};
+    const auto compile = [&] {
+        for (size_t index = next++; index < num_total; index = next++) {
+            if (index < num_graphics) {
+                auto& preload = *graphics_preloads[index];
+                preload.pipeline = std::make_unique<GraphicsPipeline>(
+                    instance, scheduler, desc_heap, profile, preload.key, *pipeline_cache,
+                    preload.infos, preload.runtime_infos,
+                    preload.fetch_shader ? &*preload.fetch_shader : nullptr, preload.modules,
+                    preload.sdata, true);
+            } else {
+                auto& preload = *compute_preloads[index - num_graphics];
+                preload.pipeline = std::make_unique<ComputePipeline>(
+                    instance, scheduler, desc_heap, profile, *pipeline_cache, preload.key,
+                    *preload.info, preload.module, preload.sdata, true);
+            }
+        }
+    };
+    const u32 num_workers = preload_threads - 1u;
+    {
+        std::vector<std::jthread> workers;
+        workers.reserve(num_workers);
+        for (u32 i = 0; i < num_workers; ++i) {
+            workers.emplace_back(compile);
+        }
+        compile();
+    }
+
+    for (auto& preload : graphics_preloads) {
+        const auto [it, is_new] =
+            graphics_pipelines.try_emplace(preload->key, std::move(preload->pipeline));
+        ASSERT(is_new);
+    }
+    for (auto& preload : compute_preloads) {
+        const auto [it, is_new] =
+            compute_pipelines.try_emplace(preload->key, std::move(preload->pipeline));
+        ASSERT(is_new);
+    }
+    graphics_preloads.clear();
+    compute_preloads.clear();
+    defer_preload_compile = false;
 }
 
 void PipelineCache::Sync() {

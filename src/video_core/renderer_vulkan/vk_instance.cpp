@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
 #include <boost/container/static_vector.hpp>
 #include <fmt/format.h>
 #include <fmt/ranges.h>
@@ -451,6 +452,8 @@ bool Instance::CreateDevice() {
             .shaderSharedInt64Atomics = vk12_features.shaderSharedInt64Atomics,
             .shaderFloat16 = vk12_features.shaderFloat16,
             .shaderInt8 = vk12_features.shaderInt8,
+            .shaderSampledImageArrayNonUniformIndexing =
+                vk12_features.shaderSampledImageArrayNonUniformIndexing,
             .scalarBlockLayout = vk12_features.scalarBlockLayout,
             .uniformBufferStandardLayout = vk12_features.uniformBufferStandardLayout,
             .separateDepthStencilLayouts = vk12_features.separateDepthStencilLayouts,
@@ -724,17 +727,30 @@ void Instance::CollectPhysicalMemoryInfo() {
         // If memory budget is not supported, use the size of the heap as the budget.
         total_memory_budget += memory_props.memoryHeaps[i].size;
     }
+    const u64 reported_budget = total_memory_budget;
     if (!IsIntegrated()) {
         // We reserve some memory for the system.
         const u64 system_memory = std::min<u64>(total_memory_budget / 8, 1_GB);
         total_memory_budget -= system_memory;
     } else {
-        // Leave at least 8 GB for the system on integrated GPUs.
+        // Leave at least 8 GB for the system on integrated GPUs. On unified memory the heap is
+        // the system RAM; when the reported budget leaves less than that, half of the heap is
+        // still a sane texture budget (KosmicKrisp on a 48 GB Mac fell to the 2 GB floor, and
+        // the texture cache then evicted ~10 images a second all match long).
         const s64 available_memory = static_cast<s64>(total_memory_budget - device_initial_usage);
         total_memory_budget =
             static_cast<u64>(std::max<s64>(available_memory - 8_GB, static_cast<s64>(2_GB)));
+        total_memory_budget = std::max<u64>(total_memory_budget, local_memory / 2);
     }
-    LOG_INFO(Render_Vulkan, "GPU memory budget is {} MiB", total_memory_budget / 1_MB);
+    if (const char* value = std::getenv("SHADPS4_GPU_MEMORY_BUDGET_MB");
+        value != nullptr && value[0] != '\0') {
+        total_memory_budget = std::strtoull(value, nullptr, 10) * 1_MB;
+    }
+    LOG_INFO(Render_Vulkan,
+             "GPU memory budget is {} MiB (heaps {} MiB, reported budget {} MiB, initial usage "
+             "{} MiB)",
+             total_memory_budget / 1_MB, local_memory / 1_MB, reported_budget / 1_MB,
+             device_initial_usage / 1_MB);
 }
 
 void Instance::CollectImageFormatInfo() {

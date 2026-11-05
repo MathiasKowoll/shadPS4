@@ -1,0 +1,51 @@
+{
+  "title_id": "CUSA52342",
+  "app_version": "01.25",
+  "files": {
+    "eboot.bin": {
+      "size": 298618475,
+      "sha256": "9224bbfab8b6a816d96bd19e02f4552fe0315bd3df567450615e59014a36da1a"
+    },
+    "Engine.MovieVLC.LibVLC.prx": {
+      "size": 3312957,
+      "sha256": "ac1b2763acb273bdee8ada7660308ac439b32d70d4f126ed1909a4f67fa97a94"
+    },
+    "Engine.Render.Core2.PlatformPs4.prx": {
+      "size": 1230648,
+      "sha256": "675259081c69b80967e3cc2429d8ec50f35de32ed8aa874fa7b986f9d51388dd"
+    },
+    "dlcldr.prx": {
+      "size": 177264,
+      "sha256": "db4aba8e01701e44003ad8f2a3abc6c9ad39ea291a4afe612ad23a52b388f12f"
+    },
+    "libSceNpPartner001.prx": {
+      "size": 6013,
+      "sha256": "7cc6a7b1a1171df32e74e96a81ec991a687dec43b4e74694628076538bda8fc5"
+    },
+    "sce_module/libSceFace.prx": {
+      "size": 303584,
+      "sha256": "c4b257e07a8f38bd05d4bb2266ddb28d5ccc3d9713a7a416718c2bd466ca59f1"
+    },
+    "sce_module/libSceFios2.prx": {
+      "size": 457105,
+      "sha256": "149539aade78e535aa393e786750968d281f98105bc244939f999d7ffacbe3a4"
+    },
+    "sce_module/libSceHand.prx": {
+      "size": 23512,
+      "sha256": "05c95d3053bec185e3085f5d2f373178b6a1ecb91d6c783d5149f6fdbd755022"
+    },
+    "sce_module/libSceNpToolkit2.prx": {
+      "size": 830470,
+      "sha256": "c2270df4ed70fecab01cdd66761ed2faf71a3578f70ab95576d2dbe15f660fa0"
+    },
+    "sce_module/libSceS3DConversion.prx": {
+      "size": 352641,
+      "sha256": "7f683e08d8728e38dc225313496bb3cd364e2e9cb4392be8ba4fe8c3637df722"
+    },
+    "sce_module/libc.prx": {
+      "size": 1374546,
+      "sha256": "ad48d24e8118b9be68c43f30178a0e2d1dfceb125c30e44f78d4e2348811cb28"
+    }
+  }
+}
+

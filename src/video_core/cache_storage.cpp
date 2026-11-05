@@ -129,8 +129,14 @@ void DataBase::Close() {
     io_worker.join();
 
     if (EmulatorSettings.IsPipelineCacheArchived()) {
-        mz_zip_writer_finalize_archive(&zip_ar);
-        mz_zip_writer_end(&zip_ar);
+        if (zip_ar.m_zip_mode == MZ_ZIP_MODE_READING) {
+            // Closed before FinishPreload, e.g. an incompatible cache: release the reader.
+            mz_zip_reader_end(&zip_ar);
+        } else {
+            mz_zip_writer_finalize_archive(&zip_ar);
+            mz_zip_writer_end(&zip_ar);
+        }
+        ar_is_read_only = true;
     }
 
     opened = false;
@@ -257,6 +263,54 @@ void DataBase::ForEachBlob(BlobType type, const std::function<void(std::vector<u
             }
         }
     }
+}
+
+static std::filesystem::path TaggedCachePath(const std::filesystem::path& path,
+                                             std::string_view tag) {
+    auto tagged = path;
+    tagged.replace_filename(
+        fmt::format("{}.{}{}", path.stem().string(), tag, path.extension().string()));
+    return tagged;
+}
+
+bool DataBase::SetAside(std::string_view tag) {
+    if (opened || cache_path.empty()) {
+        return false;
+    }
+    if (!std::filesystem::exists(cache_path)) {
+        return true;
+    }
+    const auto target = TaggedCachePath(cache_path, tag);
+    std::error_code ec;
+    if (std::filesystem::is_directory(target, ec)) {
+        std::filesystem::remove_all(target, ec);
+    }
+    std::filesystem::rename(cache_path, target, ec);
+    if (ec) {
+        LOG_ERROR(Render, "Could not set the cache {} aside: {}", cache_path.string(),
+                  ec.message());
+        return false;
+    }
+    LOG_WARNING(Render, "Set the previous cache aside as {}", target.string());
+    return true;
+}
+
+bool DataBase::Restore(std::string_view tag) {
+    if (opened || cache_path.empty()) {
+        return false;
+    }
+    const auto source = TaggedCachePath(cache_path, tag);
+    std::error_code ec;
+    if (!std::filesystem::exists(source, ec) || std::filesystem::exists(cache_path, ec)) {
+        return false;
+    }
+    std::filesystem::rename(source, cache_path, ec);
+    if (ec) {
+        LOG_ERROR(Render, "Could not restore the cache {}: {}", source.string(), ec.message());
+        return false;
+    }
+    LOG_INFO(Render, "Restored the cache kept for this profile from {}", source.string());
+    return true;
 }
 
 void DataBase::FinishPreload() {

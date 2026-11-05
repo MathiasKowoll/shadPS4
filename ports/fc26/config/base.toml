@@ -1,0 +1,73 @@
+[General]
+enableDiscordRPC = false
+isConnectedToNetwork = false
+isDevKit = false
+isPS4Pro = false
+isPSNSignedIn = false
+logFilter = ""
+logType = "sync"
+showSplash = false
+userName = "FC26"
+volumeSlider = 100
+
+[Input]
+backgroundControllerInput = false
+cursorHideTimeout = 5
+cursorState = 1
+isMotionControlsEnabled = true
+specialPadClass = 1
+usbDeviceBackend = 0
+useSpecialPad = false
+useUnifiedInputConfig = true
+
+[Audio]
+mainOutputDevice = "Default Device"
+micDevice = "Default Device"
+padSpkOutputDevice = "Default Device"
+
+[GPU]
+allowHDR = false
+copyGPUBuffers = false
+directMemoryAccess = false
+dumpShaders = false
+fsrEnabled = false
+Fullscreen = false
+FullscreenMode = "Windowed"
+internalScreenHeight = 1080
+internalScreenWidth = 1920
+nullGpu = false
+patchShaders = false
+presentMode = "Fifo"
+rcasAttenuation = 250
+rcasEnabled = false
+readbackLinearImages = false
+screenHeight = 900
+screenWidth = 1600
+vblankFrequency = 60
+
+[Vulkan]
+crashDiagnostic = false
+gpuId = -1
+guestMarkers = false
+hostMarkers = false
+pipelineCacheArchive = true
+pipelineCacheEnable = true
+rdocEnable = false
+validation = false
+validation_core = true
+validation_gpu = false
+validation_sync = false
+
+[Debug]
+CollectShader = false
+DebugDump = false
+isSeparateLogFilesEnabled = false
+logEnabled = true
+showFpsCounter = true
+
+[Keys]
+TrophyKey = ""
+
+[Settings]
+consoleLanguage = 1
+

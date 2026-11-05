@@ -1,6 +1,11 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <charconv>
+#include <cstdlib>
+#include <cstring>
+#include <optional>
+
 #include "common/assert.h"
 #include "common/elf_info.h"
 #include "common/logging/log.h"
@@ -18,6 +23,26 @@ extern std::unique_ptr<Vulkan::Presenter> presenter;
 namespace Libraries::VideoOut {
 
 static std::unique_ptr<VideoOutDriver> driver;
+
+static std::optional<s32> GetFlipRateOverride() {
+    static const std::optional<s32> override = [] -> std::optional<s32> {
+        const char* value = std::getenv("SHADPS4_VIDEOOUT_FLIP_RATE_OVERRIDE");
+        if (value == nullptr || value[0] == '\0') {
+            return std::nullopt;
+        }
+
+        s32 parsed{};
+        const char* end = value + std::strlen(value);
+        const auto [ptr, error] = std::from_chars(value, end, parsed);
+        if (error != std::errc{} || ptr != end || parsed < 0) {
+            LOG_ERROR(Lib_VideoOut,
+                      "Ignoring invalid SHADPS4_VIDEOOUT_FLIP_RATE_OVERRIDE value '{}'", value);
+            return std::nullopt;
+        }
+        return parsed;
+    }();
+    return override;
+}
 
 void PS4_SYSV_ABI sceVideoOutSetBufferAttribute(BufferAttribute* attribute, PixelFormat pixelFormat,
                                                 u32 tilingMode, u32 aspectRatio, u32 width,
@@ -139,8 +164,9 @@ s32 PS4_SYSV_ABI sceVideoOutRegisterBuffers(s32 handle, s32 startIndex, void* co
 }
 
 s32 PS4_SYSV_ABI sceVideoOutSetFlipRate(s32 handle, s32 rate) {
-    LOG_TRACE(Lib_VideoOut, "called");
-    driver->GetPort(handle)->flip_rate = rate;
+    const s32 effective_rate = GetFlipRateOverride().value_or(rate);
+    LOG_INFO(Lib_VideoOut, "requested rate = {}, effective rate = {}", rate, effective_rate);
+    driver->GetPort(handle)->flip_rate = effective_rate;
     return ORBIS_OK;
 }
 

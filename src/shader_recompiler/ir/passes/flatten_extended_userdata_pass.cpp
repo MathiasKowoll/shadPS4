@@ -159,6 +159,7 @@ struct PassInfo {
         boost::container::flat_map<IR::Value, Shader::IR::Inst*, PointerListCompare>;
 
     Optimization::SrtGvnTable gvn_table;
+    const Info* info{};
     // keys are GetUserData, ReadConst or ReadConstBuffer instructions that are used as pointers
     std::unordered_map<IR::Inst*, PtrUserList> pointer_uses;
     // GetUserData instructions corresponding to sgpr_base of SRT roots
@@ -508,6 +509,33 @@ static bool IsAllowedOffsetInstruction(const IR::Inst* inst) {
     }
 }
 
+static bool CanComputeOffset(PassInfo& pass_info, const IR::Value& off_dw) {
+    if (off_dw.IsImmediate()) {
+        return true;
+    }
+
+    IR::Inst* inst = off_dw.Inst();
+    switch (inst->GetOpcode()) {
+    case IR::Opcode::GetUserData:
+        return true;
+    case IR::Opcode::ReadConst:
+    case IR::Opcode::ReadConstBuffer:
+        return GetFlatbufOffset(pass_info.DeduplicateInstruction(inst)) != 0;
+    default:
+        break;
+    }
+
+    if (!IsAllowedOffsetInstruction(inst) || inst->AreAllArgsImmediates()) {
+        return false;
+    }
+    for (size_t index = 0; index < inst->NumArgs(); ++index) {
+        if (!CanComputeOffset(pass_info, inst->Arg(index))) {
+            return false;
+        }
+    }
+    return true;
+}
+
 static bool ComputeOffset(Xbyak::CodeGenerator& c, Xbyak::Reg32 reg, PassInfo& pass_info,
                           const IR::Value& off_dw) {
     ASSERT(reg != ecx && reg != edx);
@@ -560,7 +588,9 @@ static bool ComputeOffset(Xbyak::CodeGenerator& c, Xbyak::Reg32 reg, PassInfo& p
         ABORT_ON_FAILURE(EmitComputeOffsetBitFieldUExtract(c, reg, pass_info, inst));
         return true;
     default:
-        LOG_ERROR(Render_Recompiler, "Unexpected instruction for offset computation, {}",
+        LOG_ERROR(Render_Recompiler,
+                  "Unexpected instruction for offset computation in {} shader {:#x}, {}",
+                  pass_info.info->hw_stage, pass_info.info->pgm_hash,
                   magic_enum::enum_name(inst->GetOpcode()));
         return false;
     }
@@ -593,8 +623,12 @@ static void VisitPointer(const IR::Value& off_dw, IR::Inst* subtree, PassInfo& p
         return;
     }
 
+    if (!CanComputeOffset(pass_info, off_dw)) {
+        return;
+    }
     if (!PushPtr(c, pass_info, off_dw)) {
-        LOG_ERROR(Render_Recompiler, "Failed to compute offset for SRT walker");
+        LOG_ERROR(Render_Recompiler, "Failed to compute offset for SRT walker in {} shader {:#x}",
+                  pass_info.info->hw_stage, pass_info.info->pgm_hash);
         return;
     }
     PassInfo::PtrUserList* use_list = pass_info.GetUsesAsPointer(subtree);
@@ -609,8 +643,13 @@ static void VisitPointer(const IR::Value& off_dw, IR::Inst* subtree, PassInfo& p
         if (src_off_dw.IsImmediate()) {
             c.mov(r10d, ptr[rdi + (src_off_dw.U32() << 2)]);
         } else {
+            if (!CanComputeOffset(pass_info, src_off_dw)) {
+                continue;
+            }
             if (!ComputeOffset(c, r10d, pass_info, src_off_dw)) {
-                LOG_ERROR(Render_Recompiler, "Failed to compute offset for SRT walker");
+                LOG_ERROR(Render_Recompiler,
+                          "Failed to compute offset for SRT walker in {} shader {:#x}",
+                          pass_info.info->hw_stage, pass_info.info->pgm_hash);
                 continue;
             }
             c.shl(r10d, 2);
@@ -654,6 +693,13 @@ static void GenerateSrtProgram(Info& info, PassInfo& pass_info) {
     ASSERT(pass_info.dst_off_dw == info.srt_info.flattened_bufsize_dw);
 
     for (const auto& [sgpr_base, root] : pass_info.srt_roots) {
+        const u32 root_index = static_cast<u32>(sgpr_base);
+        if (root_index + 1 < NUM_USER_DATA_REGS) {
+            // Dynamic SRT offsets cannot be evaluated by the host walker. Preserve their root
+            // user-data pointers so the buffer cache can make the descriptor-table page resident
+            // before the first shader invocation instead of relying on a later GPU fault retry.
+            info.dma_srt_root_mask |= u16{1} << root_index;
+        }
         VisitPointer(IR::Value(static_cast<u32>(sgpr_base)), root, pass_info, c);
     }
 
@@ -746,6 +792,7 @@ void SimplifyReadConstAddressAdd(IR::Inst& inst) {
 void FlattenExtendedUserdataPass(IR::Program& program) {
     auto& post_order = program.post_order_blocks;
     PassInfo pass_info;
+    pass_info.info = &program.info;
 
     // traverse at end and assign offsets to duplicate readconsts, using
     // vn_to_inst as the source

@@ -1,6 +1,11 @@
 // SPDX-FileCopyrightText: Copyright 2025 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <map>
+#include <string>
+#include <algorithm>
+#include <cstdlib>
+#include "core/debug_state.h"
 #include "common/alignment.h"
 #include "video_core/buffer_cache/buffer.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
@@ -53,8 +58,13 @@ static std::pair<u32, u32> SanitizeCopyLayers(const VideoCore::ImageInfo& src_in
     if (vk_src_type == vk_dst_type) {
         if (src_layers != dst_layers) {
             LOG_WARNING(Render_Vulkan,
-                        "Coercing copy source layers {} and destination layers {} to minimum.",
-                        src_layers, dst_layers);
+                        "Coercing copy source layers {} and destination layers {} to minimum: "
+                        "src {:#x} {}x{} {} levels={}, dst {:#x} {}x{} {} levels={}",
+                        src_layers, dst_layers, src_info.guest_address, src_info.size.width,
+                        src_info.size.height, vk::to_string(src_info.pixel_format),
+                        src_info.resources.levels, dst_info.guest_address, dst_info.size.width,
+                        dst_info.size.height, vk::to_string(dst_info.pixel_format),
+                        dst_info.resources.levels);
             src_layers = dst_layers = std::min(src_layers, dst_layers);
         }
     } else {
@@ -108,8 +118,18 @@ void Runtime::TickFrame() {
     staging_pool.TickFrame();
 }
 
+void Runtime::CopyBufferBeforeSession(const VideoCore::Buffer* src, const VideoCore::Buffer* dst,
+                                      std::span<const vk::BufferCopy> copies) {
+    scheduler.UploadCommandBuffer().copyBuffer(src->Handle(), dst->Handle(), copies);
+}
+
 void Runtime::CopyBuffer(const VideoCore::Buffer* src, const VideoCore::Buffer* dst,
                          std::span<const vk::BufferCopy> copies) {
+    if (scheduler.IsRendering()) {
+        DebugState.AddPerf(DebugStateType::DebugStateImpl::PerfCounter::CopySplits);
+        // The caller of the copy that ends the pass, next to the EndRendering site (diagnostics).
+        DebugState.AddPassEnd(__builtin_return_address(0));
+    }
     scheduler.EndRendering();
 
     bool needs_flush{};
@@ -461,8 +481,8 @@ void Runtime::CopyColorAndDepth(VideoCore::Image* src, VideoCore::Image* dst) {
                 staging_pool.Request(COPY_BUFFER_SIZE, VideoCore::MemoryType::DeviceLocal);
             CopyImageWithBuffer(src, dst, copy_ref.buffer, copy_ref.offset);
         }
-    } else if (src->info.num_samples == 1 && dst->info.num_samples > 1 &&
-               dst->info.props.is_depth) {
+    } else if (dst->info.num_samples > 1 && dst->info.props.is_depth &&
+               (src->info.num_samples == 1 || src->info.num_samples == dst->info.num_samples)) {
         // Perform a rendering pass to transfer the channels of source as samples in dest.
         bool needs_flush =
             Transit(src, vk::ImageLayout::eShaderReadOnlyOptimal,
@@ -476,11 +496,24 @@ void Runtime::CopyColorAndDepth(VideoCore::Image* src, VideoCore::Image* dst) {
         }
 
         const u32 actual_dst_samples = static_cast<u32>(dst->backing->image.image_ci.samples);
+        const bool actual_src_msaa =
+            src->backing->image.image_ci.samples != vk::SampleCountFlagBits::e1;
         blit_helper->ReinterpretColorAsMsDepth(
             dst->info.size.width, dst->info.size.height, actual_dst_samples, src->info.pixel_format,
-            dst->info.pixel_format, src->GetImage(), dst->GetImage());
+            dst->info.pixel_format, actual_src_msaa, src->GetImage(), dst->GetImage());
     } else {
-        LOG_WARNING(Render_Vulkan, "Unimplemented depth overlap copy");
+        LOG_WARNING(Render_Vulkan,
+                    "Unimplemented depth overlap copy: src samples={} format={} depth={} "
+                    "aspect={:#x} size={}x{}x{} layers={} levels={}; dst samples={} format={} "
+                    "depth={} aspect={:#x} size={}x{}x{} layers={} levels={}",
+                    src->info.num_samples, vk::to_string(src->info.pixel_format),
+                    static_cast<bool>(src->info.props.is_depth), static_cast<u32>(src->aspect_mask),
+                    src->info.size.width, src->info.size.height, src->info.size.depth,
+                    src->info.resources.layers, src->info.resources.levels, dst->info.num_samples,
+                    vk::to_string(dst->info.pixel_format),
+                    static_cast<bool>(dst->info.props.is_depth), static_cast<u32>(dst->aspect_mask),
+                    dst->info.size.width, dst->info.size.height, dst->info.size.depth,
+                    dst->info.resources.layers, dst->info.resources.levels);
     }
 }
 
@@ -743,6 +776,56 @@ void Runtime::AccessBuffer(const VideoCore::Buffer* handle, u64 offset, u64 size
     memory_barrier.srcAccessMask |= src_access & WRITE_MASK;
 }
 
+/// SHADPS4_PASS_DIAG=1 (diagnostics): what the barriers that end an open render pass are for.
+static void CountBarrierSplit(const vk::MemoryBarrier2& memory_barrier,
+                              std::span<const vk::ImageMemoryBarrier2> image_barriers) {
+    static const bool enabled = [] {
+        const char* value = std::getenv("SHADPS4_PASS_DIAG");
+        return value != nullptr && value[0] == '1';
+    }();
+    if (!enabled) {
+        return;
+    }
+    static std::map<std::string, u32> kinds;
+    static u32 total{};
+    const auto src = memory_barrier.srcAccessMask;
+    std::string key;
+    if (src & vk::AccessFlagBits2::eShaderWrite) {
+        key += fmt::format("mem:shader-write({}) ", vk::to_string(memory_barrier.srcStageMask));
+    }
+    if (src & vk::AccessFlagBits2::eTransferWrite) {
+        key += "mem:transfer-write ";
+    }
+    if (src & (vk::AccessFlagBits2::eColorAttachmentWrite |
+               vk::AccessFlagBits2::eDepthStencilAttachmentWrite)) {
+        key += "mem:attachment-write ";
+    }
+    if (src && key.empty()) {
+        key += "mem:read-only ";
+    }
+    for (const auto& barrier : image_barriers) {
+        key += fmt::format("img:{}->{} ", vk::to_string(barrier.oldLayout),
+                           vk::to_string(barrier.newLayout));
+        break;
+    }
+    if (image_barriers.size() > 1) {
+        key += fmt::format("(+{} images)", image_barriers.size() - 1);
+    }
+    ++kinds[key];
+    if (++total == 3000) {
+        std::vector<std::pair<u32, std::string>> sorted;
+        for (const auto& [k, v] : kinds) {
+            sorted.emplace_back(v, k);
+        }
+        std::sort(sorted.rbegin(), sorted.rend());
+        for (size_t i = 0; i < std::min<size_t>(sorted.size(), 8); ++i) {
+            LOG_INFO(Render_Vulkan, "Barrier split {}: {}", sorted[i].first, sorted[i].second);
+        }
+        kinds.clear();
+        total = 0;
+    }
+}
+
 void Runtime::FlushBarriers() {
     vk::DependencyInfo dep_info{};
 
@@ -759,6 +842,9 @@ void Runtime::FlushBarriers() {
         return;
     }
 
+    if (scheduler.IsRendering()) {
+        CountBarrierSplit(memory_barrier, image_barriers);
+    }
     scheduler.EndRendering();
     const auto cmdbuf = scheduler.CommandBuffer();
     cmdbuf.pipelineBarrier2(dep_info);

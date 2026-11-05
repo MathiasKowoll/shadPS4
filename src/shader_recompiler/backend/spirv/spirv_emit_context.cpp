@@ -1001,8 +1001,16 @@ void EmitContext::DefineImagesAndSamplers() {
 
         const u32 num_bindings = image_desc.NumBindings(info);
         Id pointee_type = image_type;
-        if (mip_fallback_mode == MipStorageFallbackMode::DynamicIndex) {
+        if (mip_fallback_mode == MipStorageFallbackMode::DynamicIndex ||
+            image_desc.descriptor_count != 0) {
             pointee_type = TypeArray(pointee_type, ConstU32(num_bindings));
+        }
+        if (image_desc.descriptor_count != 0) {
+            AddCapability(spv::Capability::ShaderNonUniform);
+            AddCapability(spv::Capability::SampledImageArrayNonUniformIndexing);
+            if (profile.supported_spirv < 0x00010500) {
+                AddExtension("SPV_EXT_descriptor_indexing");
+            }
         }
 
         const Id pointer_type{TypePointer(spv::StorageClass::UniformConstant, pointee_type)};
@@ -1019,6 +1027,7 @@ void EmitContext::DefineImagesAndSamplers() {
             .view_type = sharp.GetViewType(image_desc.is_array),
             .is_integer = is_integer,
             .is_storage = is_storage,
+            .is_descriptor_array = image_desc.descriptor_count != 0,
             .mip_fallback_mode = mip_fallback_mode,
         });
         interfaces.push_back(id);
@@ -1223,9 +1232,8 @@ Id EmitContext::DefineGetBdaPointer() {
     const auto page_mask{OpShiftLeftLogical(U32[1], u32_one_value, page_mod32)};
     const auto fault_ptr{
         OpAccessChain(fault_pointer_type, fault_buffer_id, u32_zero_value, page_div32)};
-    const auto fault_value{OpLoad(U32[1], fault_ptr)};
-    const auto fault_value_masked{OpBitwiseOr(U32[1], fault_value, page_mask)};
-    OpStore(fault_ptr, fault_value_masked);
+    const auto device_scope{ConstU32(static_cast<u32>(spv::Scope::Device))};
+    OpAtomicOr(U32[1], fault_ptr, device_scope, u32_zero_value, page_mask);
 
     // Return null pointer
     const auto fallback_result{u64_zero_value};

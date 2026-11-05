@@ -3,8 +3,11 @@
 
 #pragma once
 
+#include <array>
+#include <atomic>
 #include <deque>
 #include <boost/container/small_vector.hpp>
+#include <tsl/robin_map.h>
 
 #include "common/enum.h"
 #include "common/interval_set.h"
@@ -43,6 +46,9 @@ enum class ObtainBufferFlags {
     IsTexelBuffer = 1 << 1,
     IgnoreStreamBuffer = 1 << 2,
     InvalidateTextureCache = 1 << 3,
+    /// Read-only binding whose real footprint is unknown (an unbounded raw buffer clamped to the
+    /// arena page): only its head counts as used by the session when deciding upload order.
+    LooseFootprint = 1 << 4,
 };
 DECLARE_ENUM_FLAG_OPERATORS(ObtainBufferFlags)
 
@@ -123,6 +129,9 @@ public:
     /// Synchronizes all buffers needed for DMA.
     void SynchronizeDmaBuffers();
 
+    /// Makes the first sparse page of a dynamically indexed SRT available before a draw.
+    void PreloadDmaSrt(VAddr device_addr);
+
     /// Commits pending sparse buffer memory binds. Must be called before every scheduler submit.
     void SubmitPendingArenaBinds(Vulkan::SubmitInfo& info);
 
@@ -146,7 +155,8 @@ private:
 
     void DownloadMemory(const Buffer* arena, VAddr device_addr, u64 size, bool async);
 
-    bool SynchronizeMemory(const Buffer* arena, VAddr device_addr, u32 size, bool is_written,
+    bool SynchronizeMemory(const Buffer* arena, VAddr device_addr, u32 size, bool allow_defer,
+                           bool is_written,
                            bool is_texel_buffer);
 
     bool SynchronizeMemoryFromImage(const Buffer* arena, VAddr device_addr, u32 size);
@@ -177,14 +187,39 @@ private:
     struct Backing : public Interval {
         vk::DeviceMemory memory;
         u64 offset;
+        u8* mapped; ///< Host pointer to the start of `memory` when the arena is host visible.
         constexpr bool CanMergeWith(const Backing& other) const noexcept {
             return memory == other.memory && offset + (end - start) == other.offset;
         }
         constexpr Backing SubRange(u64 a, u64 b) const noexcept {
-            return {{a, b}, memory, offset + (a - start)};
+            return {{a, b}, memory, offset + (a - start), mapped};
         }
     };
     IntervalList<Backing> resident_ranges;
+
+    /// Records the tick of the newest arena write recorded over [addr, addr + size).
+    void MarkBlocksWritten(VAddr addr, u64 size);
+    /// Copies GPU-modified ranges straight from mapped arena memory once the ticks that wrote
+    /// them are done, instead of a queue copy and a full Finish. Returns false to fall back.
+    bool TryDirectDownload(VAddr arena_base, std::span<const vk::BufferCopy> copies);
+    bool direct_downloads{};
+    tsl::robin_map<u64, u64> block_write_ticks;
+
+    /// Releases the rest of a 64 KB block after repeated write faults in it (see InvalidateMemory).
+    void ReleaseHotBlock(VAddr device_addr);
+    static constexpr u32 HotBlockSlots = 4096;
+    std::array<std::atomic<u64>, HotBlockSlots> hot_blocks{};
+    bool expand_faults{};
+
+    /// Arena ranges used by commands of the current session; uploads that touch none of them can
+    /// run before the session instead of ending the render pass that is open.
+    RangeSet session_used;
+    u64 session_used_serial{~u64{0}};
+    bool defer_uploads{};
+    /// Return address of the current ObtainBuffer call, for the inline upload diagnostics.
+    const void* obtain_caller{};
+    void LogInlineUpload(const Buffer* arena, VAddr device_addr, u32 size,
+                         std::span<const vk::BufferCopy> copies, bool is_written);
 
     u32 arena_memory_type_index{};
     u32 block_size{};
