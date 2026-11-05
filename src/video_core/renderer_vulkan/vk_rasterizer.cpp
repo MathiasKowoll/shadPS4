@@ -329,7 +329,8 @@ void Rasterizer::EliminateFastClear() {
 }
 
 /// Diagnostics: while the file named by SHADPS4_EXTRA_PASS_SPLIT_FILE exists, every 12th draw ends
-/// its render pass, so in-run A/B windows measure what a pass break costs the GPU thread.
+/// its render pass. FC26 on KosmicKrisp then shows large noise tiles in play (2026-11-05), so a pass
+/// that is ended and begun again with load operations does not keep its attachments here.
 static bool ExtraPassSplit() {
     static const char* const file = std::getenv("SHADPS4_EXTRA_PASS_SPLIT_FILE");
     if (file == nullptr || file[0] == '\0') {
