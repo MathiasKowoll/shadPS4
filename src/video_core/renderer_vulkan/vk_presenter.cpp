@@ -863,7 +863,26 @@ Frame* Presenter::PrepareBlankFrame(bool present_thread) {
     return frame;
 }
 
+/// Diagnostics: whenever the file named by SHADPS4_SCREENSHOT_FILE appears, it is removed and the
+/// next presented image is saved as a screenshot with overlays.
+static bool ScreenshotFileRequested() {
+    static const char* const path = std::getenv("SHADPS4_SCREENSHOT_FILE");
+    if (path == nullptr || path[0] == '\0') {
+        return false;
+    }
+    static u32 presents{};
+    if (presents++ % 15 != 0) {
+        return false;
+    }
+    std::error_code ec;
+    return std::filesystem::remove(path, ec);
+}
+
 void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame) {
+    if (ScreenshotFileRequested()) {
+        VideoCore::RequestScreenshot(VideoCore::ScreenshotRequest::WithOverlays);
+    }
+
     // Free the frame for reuse
     const auto free_frame = [&] {
         if (!is_reusing_frame) {
