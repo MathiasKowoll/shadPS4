@@ -329,20 +329,51 @@ void Rasterizer::EliminateFastClear() {
 }
 
 /// Diagnostics: while the file named by SHADPS4_EXTRA_PASS_SPLIT_FILE exists, every 12th draw ends
-/// its render pass. FC26 on KosmicKrisp then shows large noise tiles in play (2026-11-05), so a pass
-/// that is ended and begun again with load operations does not keep its attachments here.
-static bool ExtraPassSplit() {
+/// its render pass. FC26 on KosmicKrisp then shows large noise tiles in play (2026-11-05), so a
+/// pass that is ended and begun again with load operations does not keep its attachments here. The
+/// file may hold a mode: 1 (or empty) breaks every pass, 2 also adds a full memory barrier, 3 and 4
+/// only break passes without and with a depth or stencil attachment, 5 and 6 only single-sample and
+/// multisampled passes.
+static u32 ExtraPassSplitMode() {
     static const char* const file = std::getenv("SHADPS4_EXTRA_PASS_SPLIT_FILE");
     if (file == nullptr || file[0] == '\0') {
-        return false;
+        return 0;
     }
     static u32 draws{};
-    static bool enabled{};
-    if ((draws & 4095) == 0) {
-        std::error_code ec;
-        enabled = std::filesystem::exists(file, ec);
+    static u32 mode{};
+    if ((draws++ & 4095) == 0) {
+        mode = 0;
+        if (std::FILE* const f = std::fopen(file, "r")) {
+            mode = 1;
+            u32 parsed{};
+            if (std::fscanf(f, "%u", &parsed) == 1 && parsed != 0) {
+                mode = parsed;
+            }
+            std::fclose(f);
+        }
     }
-    return (++draws % 12) == 0 && enabled;
+    return mode;
+}
+
+static bool ExtraPassSplit(const RenderState& state, u32 num_samples, u32 mode) {
+    static u32 draws{};
+    if (mode == 0 || ++draws % 12 != 0) {
+        return false;
+    }
+    const bool has_depth_stencil =
+        state.depth_stencil_attachment.has_depth || state.depth_stencil_attachment.has_stencil;
+    switch (mode) {
+    case 3:
+        return !has_depth_stencil;
+    case 4:
+        return has_depth_stencil;
+    case 5:
+        return num_samples <= 1;
+    case 6:
+        return num_samples > 1;
+    default:
+        return true;
+    }
 }
 
 void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
@@ -403,8 +434,22 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     if (trace) {
         EndTraceCommand();
     }
-    if (ExtraPassSplit()) {
+    if (const u32 split_mode = ExtraPassSplitMode(); ExtraPassSplit(
+            scheduler.GetRenderState(), pipeline->GetGraphicsKey().num_samples, split_mode)) {
         scheduler.EndRendering();
+        if (split_mode == 2) {
+            const vk::MemoryBarrier2 full_barrier{
+                .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+                .srcAccessMask = vk::AccessFlagBits2::eMemoryWrite,
+                .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+                .dstAccessMask =
+                    vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
+            };
+            scheduler.CommandBuffer().pipelineBarrier2({
+                .memoryBarrierCount = 1,
+                .pMemoryBarriers = &full_barrier,
+            });
+        }
     }
 
     ResetBindings(false);
