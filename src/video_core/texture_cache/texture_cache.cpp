@@ -335,6 +335,30 @@ void TextureCache::InvalidateMemoryFromGPU(VAddr address, size_t max_size) {
 }
 
 void TextureCache::MarkAsMaybeGpuDirty(VAddr addr, size_t size) {
+    // SHADPS4_GPU_WRITE_DIAG=1 (diagnostics): report, once per image, a texture-only image that a
+    // GPU buffer write overlaps without marking it GpuDirty. InvalidateMemoryFromGPU only marks
+    // images that start at the written address, so such an image keeps its old contents.
+    static const bool write_diag = [] {
+        const char* value = std::getenv("SHADPS4_GPU_WRITE_DIAG");
+        return value != nullptr && value[0] == '1';
+    }();
+    if (write_diag) {
+        static std::unordered_set<VAddr> reported;
+        ForEachImageInRegion(addr, size, [&](ImageId, Image& image) {
+            const bool texture_only = !image.usage.render_target && !image.usage.depth_target &&
+                                      !image.usage.storage && !image.usage.vo_surface;
+            if (texture_only && False(image.flags & ImageFlagBits::GpuDirty) &&
+                reported.insert(image.info.guest_address).second) {
+                LOG_INFO(Render_Vulkan,
+                         "GPU write {:#x}+{:#x} overlaps texture-only image {:#x}+{:#x} {}x{} {} "
+                         "levels={} flags={:#x}, not marked GpuDirty",
+                         addr, size, image.info.guest_address, image.info.guest_size,
+                         image.info.size.width, image.info.size.height,
+                         vk::to_string(image.info.pixel_format), image.info.resources.levels,
+                         static_cast<u32>(image.flags));
+            }
+        });
+    }
     ForEachImageInRegion(addr, size, [&](ImageId image_id, Image& image) {
         // The hash is only read when the image is evicted with valid GPU data. A CpuDirty or
         // GpuDirty image gets valid data back only through a refresh, which resets the hash, or
@@ -1381,6 +1405,27 @@ void TextureCache::GarbageCollectSamplers() {
 }
 
 void TextureCache::RunGarbageCollector() {
+    // SHADPS4_REFRESH_TEXTURES_FILE (diagnostics): when the file appears, every image used only as
+    // a texture is marked CpuDirty once, so its next use uploads it again from its current source
+    // (guest memory, or buffer data where the GPU wrote). Tells stale cached textures apart from
+    // wrong source data.
+    static const char* const refresh_file = std::getenv("SHADPS4_REFRESH_TEXTURES_FILE");
+    if (refresh_file != nullptr && refresh_file[0] != '\0') {
+        std::error_code ec;
+        if (std::filesystem::exists(refresh_file, ec)) {
+            std::filesystem::remove(refresh_file, ec);
+            u32 marked{};
+            image_lru_cache.ForEachItemBelow(~u64{0}, [&](Image& image) {
+                if (!image.usage.render_target && !image.usage.depth_target &&
+                    !image.usage.storage && !image.usage.vo_surface) {
+                    image.flags |= ImageFlagBits::CpuDirty;
+                    ++marked;
+                }
+                return false;
+            });
+            LOG_INFO(Render_Vulkan, "Marked {} texture images for refresh", marked);
+        }
+    }
     GarbageCollectImages();
     GarbageCollectSamplers();
     ++gc_tick;
