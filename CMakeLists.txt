@@ -1225,6 +1225,7 @@ set(VIDEO_CORE src/video_core/amdgpu/cb_db_extent.h
                src/video_core/renderer_vulkan/vk_swapchain.h
                src/video_core/renderer_vulkan/host_passes/fsr_pass.cpp
                src/video_core/renderer_vulkan/host_passes/fsr_pass.h
+               src/video_core/renderer_vulkan/host_passes/metalfx_pass.h
                src/video_core/renderer_vulkan/host_passes/pp_pass.cpp
                src/video_core/renderer_vulkan/host_passes/pp_pass.h
                src/video_core/texture_cache/blit_helper.cpp
@@ -1329,7 +1330,8 @@ set(SHADNET src/shadnet/client.cpp
             "${SHADNET_PROTO_OUT}/shadnet.pb.cc"
 )
 if (APPLE)
-    list(APPEND EMULATOR src/sdl_window_apple.mm)
+    list(APPEND EMULATOR src/sdl_window_apple.mm
+                         src/video_core/renderer_vulkan/host_passes/metalfx_pass.mm)
 endif()
 
 if(NOT ENABLE_TESTS)
@@ -1414,6 +1416,7 @@ if (APPLE)
 
     # Replacement for std::chrono::time_zone
     target_link_libraries(shadps4 PRIVATE date::date-tz epoll-shim)
+    target_link_libraries(shadps4 PRIVATE "-framework Metal" "-framework MetalFX")
 
     # Create and embed Info.plist
     set(INFO_PLIST_PATH ${CMAKE_CURRENT_BINARY_DIR}/src/dist/Info.plist)

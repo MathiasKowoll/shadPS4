@@ -20,6 +20,7 @@ trace_imports=${FC26_TRACE_IMPORTS:-}
 patch_file=${FC26_PATCH_FILE:-}
 network_mode=${FC26_NETWORK:-preserve}
 direct_memory_access=${FC26_DIRECT_MEMORY_ACCESS:-preserve}
+metalfx=${FC26_METALFX:-preserve}
 mode=run
 verify_hashes=0
 
@@ -201,6 +202,29 @@ PY
         ;;
 esac
 
+case "$metalfx" in
+    0|1)
+        python3 - "$runtime_config" "$metalfx" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+config = json.loads(path.read_text(encoding="utf-8"))
+config["GPU"]["metalfx_enabled"] = sys.argv[2] == "1"
+path.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+        ;;
+    preserve)
+        ;;
+    *)
+        echo "STOP: FC26_METALFX must be 0, 1, or preserve, got: $metalfx" >&2
+        exit 2
+        ;;
+esac
+metalfx_state=$(python3 -c 'import json, sys
+print("on" if json.load(open(sys.argv[1]))["GPU"].get("metalfx_enabled") else "off")' "$runtime_config")
+
 if [[ ! $vblank_frequency =~ ^[0-9]+$ ]] || ((vblank_frequency < 30 || vblank_frequency > 240)); then
     echo "STOP: FC26_VBLANK_FREQUENCY must be an integer from 30 to 240" >&2
     exit 2
@@ -319,6 +343,7 @@ echo "Config: $config_mode ($runtime_config)"
 echo "Run profile: $run_profile"
 echo "Network: $network_mode"
 echo "Direct memory access: $direct_memory_access"
+echo "MetalFX upscaling: $metalfx_state"
 if [[ $run_profile == diagnostic ]]; then
     echo "Log filter: $log_filter"
 fi

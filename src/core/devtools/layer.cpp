@@ -124,6 +124,20 @@ void L::DrawMenuBar() {
 
                 ImGui::EndMenu();
             }
+#ifdef __APPLE__
+            if (BeginMenu("MetalFX")) {
+                auto& metalfx = presenter->GetMetalFxSettingsRef();
+                BeginDisabled(!presenter->IsMetalFxSupported());
+                Checkbox("MetalFX Spatial Upscaling", &metalfx.enable);
+                EndDisabled();
+                if (Button("Save")) {
+                    EmulatorSettings.SetMetalFxEnabled(metalfx.enable);
+                    EmulatorSettings.Save();
+                    CloseCurrentPopup();
+                }
+                ImGui::EndMenu();
+            }
+#endif
             ImGui::EndMenu();
         }
         if (BeginMenu("Debug")) {

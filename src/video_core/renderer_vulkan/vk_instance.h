@@ -173,6 +173,11 @@ public:
         return vertex_input_dynamic_state;
     }
 
+    /// Returns true when VK_EXT_external_memory_metal is supported.
+    bool IsExternalMemoryMetalSupported() const {
+        return external_memory_metal;
+    }
+
     /// Returns true when VK_KHR_fragment_shader_barycentric is supported.
     bool IsFragmentShaderBarycentricSupported() const {
         return fragment_shader_barycentric;
@@ -558,6 +563,7 @@ private:
     bool shader_clock{};
     bool supports_memory_budget{};
     bool supports_block_texel_view{};
+    bool external_memory_metal{};
     u64 total_memory_budget{};
     std::vector<size_t> valid_heaps;
 };

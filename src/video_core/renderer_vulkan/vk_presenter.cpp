@@ -491,6 +491,10 @@ Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_
 
     fsr_pass.Create(device, instance.GetAllocator(), num_images);
     pp_pass.Create(device, swapchain.GetSurfaceFormat().format);
+#ifdef __APPLE__
+    metalfx_settings.enable = EmulatorSettings.IsMetalFxEnabled();
+    metalfx_pass.Create(instance);
+#endif
 
     ImGui::Layer::AddLayer(Common::Singleton<Core::Devtools::Layer>::Instance());
     ImGui::Friends::Register();
@@ -740,14 +744,17 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
                     vk::PipelineStageFlagBits2::eFragmentShader, vk::AccessFlagBits2::eShaderRead);
     runtime.FlushBarriers();
 
-    image_view = fsr_pass.Render(cmdbuf, image_view, image_size, {frame->width, frame->height},
-                                 fsr_settings, frame->is_hdr);
-
     // Vulkan has no sRGB variant of the 10-bit format, so an A2R10G10B10Srgb buffer reaches
     // the post process pass still sRGB encoded and has to be decoded there instead.
     pp_settings.srgb_input =
         attribute.attrib.pixel_format == Libraries::VideoOut::PixelFormat::A2R10G10B10Srgb;
-    pp_pass.Render(cmdbuf, image_view, image_size, *frame, pp_settings);
+
+    SubmitInfo info{};
+    if (!ScaleWithMetalFx(image_view, image_size, *frame, info)) {
+        image_view = fsr_pass.Render(draw_scheduler.CommandBuffer(), image_view, image_size,
+                                     {frame->width, frame->height}, fsr_settings, frame->is_hdr);
+        pp_pass.Render(draw_scheduler.CommandBuffer(), image_view, image_size, *frame, pp_settings);
+    }
 
     DebugState.game_resolution = {image_size.width, image_size.height};
     DebugState.output_resolution = {frame->width, frame->height};
@@ -762,9 +769,25 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     // Flush frame creation commands.
     frame->ready_semaphore = draw_scheduler.GetWorkSemaphore()->Handle();
     frame->ready_tick = draw_scheduler.CurrentTick();
-    SubmitInfo info{};
     draw_scheduler.Flush(info);
     return frame;
+}
+
+bool Presenter::ScaleWithMetalFx(vk::ImageView image_view, vk::Extent2D image_size, Frame& frame,
+                                 SubmitInfo& info) {
+#ifdef __APPLE__
+    Frame* input = metalfx_pass.BeginInput(draw_scheduler, metalfx_settings, image_size, frame,
+                                           swapchain.GetSurfaceFormat().format);
+    if (input == nullptr) {
+        return false;
+    }
+    DebugState.is_using_fsr = false;
+    pp_pass.Render(draw_scheduler.CommandBuffer(), image_view, image_size, *input, pp_settings);
+    info.AddWait(metalfx_pass.DoneSemaphore(), metalfx_pass.Scale(draw_scheduler, frame));
+    return true;
+#else
+    return false;
+#endif
 }
 
 Frame* Presenter::PrepareBlankFrame(bool present_thread) {
@@ -965,7 +988,9 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
                 }
 
                 ImVec2 contentArea = ImGui::GetContentRegionAvail();
-                SetExpectedGameSize((s32)contentArea.x, (s32)contentArea.y);
+                const ImVec2 pixel_scale = ImGui::GetIO().DisplayFramebufferScale;
+                SetExpectedGameSize(static_cast<s32>(contentArea.x * pixel_scale.x),
+                                    static_cast<s32>(contentArea.y * pixel_scale.y));
 
                 const auto imgRect =
                     FitImage(game_width, game_height, (s32)contentArea.x, (s32)contentArea.y);

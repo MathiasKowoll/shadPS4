@@ -27,6 +27,7 @@
     "inline_fetch_shader": false,
     "internal_screen_height": 1080,
     "internal_screen_width": 1920,
+    "metalfx_enabled": false,
     "null_gpu": false,
     "patch_shaders": false,
     "present_mode": "Fifo",

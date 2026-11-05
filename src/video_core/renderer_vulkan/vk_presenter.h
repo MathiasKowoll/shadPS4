@@ -8,6 +8,9 @@
 #include "core/libraries/videoout/buffer.h"
 #include "imgui/imgui_texture.h"
 #include "video_core/renderer_vulkan/host_passes/fsr_pass.h"
+#ifdef __APPLE__
+#include "video_core/renderer_vulkan/host_passes/metalfx_pass.h"
+#endif
 #include "video_core/renderer_vulkan/host_passes/pp_pass.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_runtime.h"
@@ -61,6 +64,16 @@ public:
         return fsr_settings;
     }
 
+#ifdef __APPLE__
+    HostPasses::MetalFxPass::Settings& GetMetalFxSettingsRef() {
+        return metalfx_settings;
+    }
+
+    bool IsMetalFxSupported() const {
+        return metalfx_pass.IsSupported();
+    }
+#endif
+
     Frontend::WindowSDL& GetWindow() const {
         return window;
     }
@@ -106,6 +119,9 @@ private:
 
     void RecreateFrame(Frame* frame, u32 width, u32 height);
 
+    bool ScaleWithMetalFx(vk::ImageView image_view, vk::Extent2D image_size, Frame& frame,
+                          SubmitInfo& info);
+
     void SetExpectedGameSize(s32 width, s32 height);
 
 private:
@@ -136,6 +152,10 @@ private:
     std::condition_variable_any frame_cv;
     std::optional<ImGui::RefCountedTexture> splash_img;
     std::vector<VAddr> vo_buffers_addr;
+#ifdef __APPLE__
+    HostPasses::MetalFxPass::Settings metalfx_settings{};
+    HostPasses::MetalFxPass metalfx_pass;
+#endif
 };
 
 } // namespace Vulkan

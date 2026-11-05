@@ -65,6 +65,8 @@ Variables:
 - `FC26_METRICS`: `1` (the default) writes one frame-time sample per second; `0` disables it.
 - `FC26_METAL_HUD`: `1` enables Apple's Metal performance HUD for diagnostic runs; `0` (the
   default) keeps it disabled for uncontaminated frame-time measurements.
+- `FC26_METALFX`: `preserve` (the default) keeps the saved preference, `1` enables the MetalFX
+  spatial upscaler for the presented image, and `0` disables it. See "MetalFX upscaling" below.
 - `FC26_VBLANK_FREQUENCY`: host vblank rate from 30 to 240 Hz; defaults to the PS4 baseline of 60.
 - `FC26_FLIP_RATE_OVERRIDE`: defaults to `0` for the 60 FPS port; use `auto` to honor the game's
   requested 30 FPS presentation divisor.
@@ -121,6 +123,25 @@ The default build and data directories are on the external FC26 volume. The sour
 small enough to rebase normally, while generated objects and shader caches do not consume the main
 disk or enter Git. `build.sh` also creates a private Python environment inside the external build
 directory for the pinned Mesa/KosmicKrisp build dependencies.
+
+## MetalFX upscaling
+
+The game still renders at 1920x1080. With `GPU.metalfx_enabled` (or `FC26_METALFX=1`), the
+presenter scales that image to the window's real pixel size with Apple's MetalFX spatial scaler
+instead of the bilinear filter, as an alternative to FSR. It is off by default and can also be
+toggled in the developer menu under Display > MetalFX.
+
+- The window is created with high pixel density while the option is enabled, so on a Retina
+  display the presented image is sized in physical pixels (a 1600x900 window draws 3200x1800).
+  Without it macOS draws the window at point size and stretches it, and no upscaler can help.
+- KosmicKrisp has no `VK_EXT_metal_objects`. The scaler images are allocated as dedicated memory
+  whose MTLHeap is exported with `VK_EXT_external_memory_metal`; a Metal texture with the same
+  descriptor KosmicKrisp uses is placed at offset 0 of that heap. The post-processing pass renders
+  the game image into the input at 1920x1080, MetalFX runs on its own Metal queue after that
+  submission completes, and the copy into the presented frame waits for a timeline semaphore
+  that the Metal command buffer signals from the host when it finishes.
+- `SHADPS4_METALFX_OFF_FILE=<path>` is a diagnostic A/B switch: while the file exists, frames use
+  the regular presentation path in the same run.
 
 ## Shader cache
 
