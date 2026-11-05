@@ -12,6 +12,7 @@ namespace Vulkan {
 class Instance;
 class Scheduler;
 struct Frame;
+struct SubmitInfo;
 } // namespace Vulkan
 
 namespace Vulkan::HostPasses {
@@ -20,9 +21,11 @@ namespace Vulkan::HostPasses {
 ///
 /// The scaler images live in dedicated memory whose MTLHeap is exported with
 /// VK_EXT_external_memory_metal, and a Metal texture with the driver's descriptor is placed at
-/// offset 0 of that heap. The post-processing pass renders the game image into the input at game
-/// resolution. Once that submission completes, MetalFX writes the output on its own Metal queue
-/// and signals a timeline semaphore from the host, which the copy into the frame waits for.
+/// offset 0 of that heap. The post-processing pass renders the game image into one of two inputs
+/// at game resolution. Once that submission completes, MetalFX writes the output of the frame on
+/// its own Metal queue and signals a timeline semaphore from the host. The present thread waits for
+/// that value on the host before it copies the output into the frame, so the game's queue never
+/// waits for the scaler.
 class MetalFxPass {
 public:
     struct Settings {
@@ -32,7 +35,7 @@ public:
     MetalFxPass();
     ~MetalFxPass();
 
-    void Create(const Instance& instance);
+    void Create(const Instance& instance, u32 num_frames);
 
     bool IsSupported() const;
 
@@ -40,11 +43,12 @@ public:
     Frame* BeginInput(Scheduler& scheduler, const Settings& settings, vk::Extent2D input_size,
                       const Frame& output, vk::Format format);
 
-    /// Submits the input, queues the scaler behind it and records the copy into `output`.
-    /// Returns the value of the done semaphore that the submission of the copy must wait for.
+    /// Submits the input and queues the scaler behind it. Returns the value that the present
+    /// thread waits for before copying the output into `output`.
     u64 Scale(Scheduler& scheduler, const Frame& output);
 
-    vk::Semaphore DoneSemaphore() const;
+    /// Present thread: copies the scaled image into the frame once the scaler has finished.
+    void CopyOutput(vk::CommandBuffer cmdbuf, Frame& frame, SubmitInfo& info);
 
 private:
     struct Impl;

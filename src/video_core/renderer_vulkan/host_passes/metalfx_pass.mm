@@ -6,11 +6,13 @@
 #include <Metal/Metal.h>
 #include <MetalFX/MetalFX.h>
 
+#include <array>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <limits>
 #include <optional>
+#include <vector>
 
 #include "common/logging/log.h"
 #include "video_core/renderer_vulkan/host_passes/metalfx_pass.h"
@@ -23,8 +25,8 @@ namespace Vulkan::HostPasses {
 
 namespace {
 
-// KosmicKrisp creates the Metal texture of both images with this usage, and the aliasing texture
-// must use the same descriptor to share the layout.
+// KosmicKrisp creates the Metal texture of both kinds of images with this usage, and the aliasing
+// texture must use the same descriptor to share the layout.
 constexpr vk::ImageUsageFlags INPUT_USAGE =
     vk::ImageUsageFlagBits::eColorAttachment | vk::ImageUsageFlagBits::eSampled;
 constexpr vk::ImageUsageFlags OUTPUT_USAGE = vk::ImageUsageFlagBits::eColorAttachment |
@@ -82,15 +84,16 @@ struct MetalFxPass::Impl {
         vk::DeviceMemory memory;
         vk::ImageView view;
         id<MTLTexture> texture{};
+        vk::Extent2D size{};
+        vk::Format format{};
     };
 
-    bool CreateTarget(Target& target, vk::Extent2D size, vk::ImageUsageFlags usage,
-                      MTLPixelFormat pixel_format);
+    bool CreateTarget(Target& target, vk::Extent2D size, vk::Format format,
+                      vk::ImageUsageFlags usage, MTLPixelFormat pixel_format);
     void DestroyTarget(Target& target);
-    bool CreateResources(MTLPixelFormat pixel_format);
-    void DestroyResources();
-    vk::Result WaitIdle(u64 timeout_ns);
-    void Encode(u64 value);
+    vk::Result WaitDone(u64 value, u64 timeout_ns);
+    void Encode(id<MTLFXSpatialScaler> scaler, id<MTLTexture> input, id<MTLTexture> output,
+                vk::Extent2D input_size, u64 value);
 
     const Instance* instance{};
     vk::Device device;
@@ -98,21 +101,28 @@ struct MetalFxPass::Impl {
     bool supported{};
 
     id<MTLCommandQueue> queue{};
-    id<MTLFXSpatialScaler> scaler{};
     vk::UniqueSemaphore done;
     u64 serial{};
 
-    vk::Format format{};
+    // Used by the GPU command thread only. The scaler and the two inputs depend on the input size,
+    // the output size and the format.
+    id<MTLFXSpatialScaler> scaler{};
     vk::Extent2D input_size{};
     vk::Extent2D output_size{};
+    vk::Format format{};
     bool failed{};
-    Target input;
-    Target output;
+    std::array<Target, 2> inputs;
     Frame input_frame{};
+
+    // One output per presentation frame. A frame is prepared on the GPU command thread and then
+    // presented on the present thread, never both at once, so its output needs no lock.
+    std::vector<Target> outputs;
 };
 
-bool MetalFxPass::Impl::CreateTarget(Target& target, vk::Extent2D size, vk::ImageUsageFlags usage,
-                                     MTLPixelFormat pixel_format) {
+bool MetalFxPass::Impl::CreateTarget(Target& target, vk::Extent2D size, vk::Format format,
+                                     vk::ImageUsageFlags usage, MTLPixelFormat pixel_format) {
+    target.size = size;
+    target.format = format;
     const vk::ExternalMemoryImageCreateInfo external_info{
         .handleTypes = vk::ExternalMemoryHandleTypeFlagBits::eMtlheapEXT,
     };
@@ -215,68 +225,29 @@ void MetalFxPass::Impl::DestroyTarget(Target& target) {
         device.freeMemory(target.memory);
         target.memory = nullptr;
     }
+    target.size = {};
+    target.format = {};
 }
 
-bool MetalFxPass::Impl::CreateResources(MTLPixelFormat pixel_format) {
-    if (!CreateTarget(input, input_size, INPUT_USAGE, pixel_format) ||
-        !CreateTarget(output, output_size, OUTPUT_USAGE, pixel_format)) {
-        return false;
-    }
-
-    MTLFXSpatialScalerDescriptor* descriptor = [[MTLFXSpatialScalerDescriptor alloc] init];
-    descriptor.inputWidth = input_size.width;
-    descriptor.inputHeight = input_size.height;
-    descriptor.outputWidth = output_size.width;
-    descriptor.outputHeight = output_size.height;
-    descriptor.colorTextureFormat = pixel_format;
-    descriptor.outputTextureFormat = pixel_format;
-    descriptor.colorProcessingMode = MTLFXSpatialScalerColorProcessingModePerceptual;
-    scaler = [descriptor newSpatialScalerWithDevice:input.texture.device];
-    [descriptor release];
-    if (scaler == nil) {
-        LOG_ERROR(Render_Vulkan, "MetalFX: could not create the spatial scaler");
-        return false;
-    }
-    if ((scaler.colorTextureUsage | scaler.outputTextureUsage) & ~TEXTURE_USAGE) {
-        LOG_ERROR(Render_Vulkan, "MetalFX: the scaler needs texture usage {:#x}",
-                  static_cast<u64>(scaler.colorTextureUsage | scaler.outputTextureUsage));
-        return false;
-    }
-
-    input_frame.width = input_size.width;
-    input_frame.height = input_size.height;
-    input_frame.image = input.image;
-    input_frame.image_view = input.view;
-    LOG_INFO(Render_Vulkan, "MetalFX spatial scaler: {}x{} -> {}x{}, {}", input_size.width,
-             input_size.height, output_size.width, output_size.height, vk::to_string(format));
-    return true;
-}
-
-void MetalFxPass::Impl::DestroyResources() {
-    [scaler release];
-    scaler = nil;
-    DestroyTarget(input);
-    DestroyTarget(output);
-}
-
-vk::Result MetalFxPass::Impl::WaitIdle(u64 timeout_ns) {
+vk::Result MetalFxPass::Impl::WaitDone(u64 value, u64 timeout_ns) {
     const vk::Semaphore semaphore = *done;
     const vk::SemaphoreWaitInfo wait_info{
         .semaphoreCount = 1,
         .pSemaphores = &semaphore,
-        .pValues = &serial,
+        .pValues = &value,
     };
     return device.waitSemaphores(wait_info, timeout_ns);
 }
 
-void MetalFxPass::Impl::Encode(u64 value) {
+void MetalFxPass::Impl::Encode(id<MTLFXSpatialScaler> encode_scaler, id<MTLTexture> input,
+                               id<MTLTexture> output, vk::Extent2D size, u64 value) {
     @autoreleasepool {
         id<MTLCommandBuffer> command_buffer = [queue commandBuffer];
-        scaler.colorTexture = input.texture;
-        scaler.outputTexture = output.texture;
-        scaler.inputContentWidth = input_size.width;
-        scaler.inputContentHeight = input_size.height;
-        [scaler encodeToCommandBuffer:command_buffer];
+        encode_scaler.colorTexture = input;
+        encode_scaler.outputTexture = output;
+        encode_scaler.inputContentWidth = size.width;
+        encode_scaler.inputContentHeight = size.height;
+        [encode_scaler encodeToCommandBuffer:command_buffer];
 
         const vk::Device signal_device = device;
         const vk::Semaphore semaphore = *done;
@@ -292,6 +263,9 @@ void MetalFxPass::Impl::Encode(u64 value) {
         }];
         [command_buffer commit];
     }
+    [encode_scaler release];
+    [input release];
+    [output release];
 }
 
 MetalFxPass::MetalFxPass() : impl{std::make_unique<Impl>()} {}
@@ -300,17 +274,24 @@ MetalFxPass::~MetalFxPass() {
     if (!impl->supported) {
         return;
     }
-    if (impl->WaitIdle(2'000'000'000) != vk::Result::eSuccess) {
+    if (impl->WaitDone(impl->serial, 2'000'000'000) != vk::Result::eSuccess) {
         LOG_ERROR(Render_Vulkan, "MetalFX: scaler work did not finish before shutdown");
     }
-    impl->DestroyResources();
+    [impl->scaler release];
+    for (auto& input : impl->inputs) {
+        impl->DestroyTarget(input);
+    }
+    for (auto& output : impl->outputs) {
+        impl->DestroyTarget(output);
+    }
     [impl->queue release];
 }
 
-void MetalFxPass::Create(const Instance& instance) {
+void MetalFxPass::Create(const Instance& instance, u32 num_frames) {
     auto& s = *impl;
     s.instance = &instance;
     s.device = instance.GetDevice();
+    s.outputs.resize(num_frames);
     s.get_metal_handle = reinterpret_cast<PFN_vkGetMemoryMetalHandleEXT>(
         s.device.getProcAddr("vkGetMemoryMetalHandleEXT"));
 
@@ -338,118 +319,196 @@ Frame* MetalFxPass::BeginInput(Scheduler& scheduler, const Settings& settings,
                                vk::Extent2D input_size, const Frame& output, vk::Format format) {
     auto& s = *impl;
     const vk::Extent2D output_size{output.width, output.height};
-    if (!settings.enable || !s.supported || output_size.width < input_size.width ||
-        output_size.height < input_size.height || output_size == input_size || IsSwitchedOff()) {
+    const auto pixel_format = ToMetalFormat(format);
+    if (!settings.enable || !s.supported || !pixel_format || output.id >= s.outputs.size() ||
+        output_size.width < input_size.width || output_size.height < input_size.height ||
+        output_size == input_size || IsSwitchedOff()) {
         return nullptr;
     }
 
-    if (input_size != s.input_size || output_size != s.output_size || format != s.format) {
+    auto& out = s.outputs[output.id];
+    const bool scaler_changed =
+        input_size != s.input_size || output_size != s.output_size || format != s.format;
+    const bool output_changed = out.size != output_size || out.format != format;
+    if (scaler_changed || output_changed) {
+        // Scaler work still in flight reads the old inputs and writes the old outputs.
         scheduler.Finish();
-        if (s.WaitIdle(std::numeric_limits<u64>::max()) != vk::Result::eSuccess) {
+        if (s.WaitDone(s.serial, std::numeric_limits<u64>::max()) != vk::Result::eSuccess) {
             return nullptr;
         }
-        s.DestroyResources();
+    }
+    if (scaler_changed) {
+        [s.scaler release];
+        s.scaler = nil;
+        for (auto& input : s.inputs) {
+            s.DestroyTarget(input);
+        }
         s.input_size = input_size;
         s.output_size = output_size;
         s.format = format;
-        const auto pixel_format = ToMetalFormat(format);
-        s.failed = !pixel_format || !s.CreateResources(*pixel_format);
+        s.failed = false;
+
+        MTLFXSpatialScalerDescriptor* descriptor = [[MTLFXSpatialScalerDescriptor alloc] init];
+        descriptor.inputWidth = input_size.width;
+        descriptor.inputHeight = input_size.height;
+        descriptor.outputWidth = output_size.width;
+        descriptor.outputHeight = output_size.height;
+        descriptor.colorTextureFormat = *pixel_format;
+        descriptor.outputTextureFormat = *pixel_format;
+        descriptor.colorProcessingMode = MTLFXSpatialScalerColorProcessingModePerceptual;
+        id<MTLDevice> mtl_device = MTLCreateSystemDefaultDevice();
+        s.scaler = [descriptor newSpatialScalerWithDevice:mtl_device];
+        [mtl_device release];
+        [descriptor release];
+        s.failed = s.scaler == nil ||
+                   ((s.scaler.colorTextureUsage | s.scaler.outputTextureUsage) & ~TEXTURE_USAGE);
+        for (auto& input : s.inputs) {
+            s.failed =
+                s.failed || !s.CreateTarget(input, input_size, format, INPUT_USAGE, *pixel_format);
+        }
         if (s.failed) {
             LOG_WARNING(Render_Vulkan, "MetalFX: scaling {}x{} to {}x{} as {} is not available",
                         input_size.width, input_size.height, output_size.width, output_size.height,
                         vk::to_string(format));
-            s.DestroyResources();
-            return nullptr;
+        } else {
+            LOG_INFO(Render_Vulkan, "MetalFX spatial scaler: {}x{} -> {}x{}, {}", input_size.width,
+                     input_size.height, output_size.width, output_size.height,
+                     vk::to_string(format));
         }
         const std::array to_general{
             vk::ImageMemoryBarrier2{
                 .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
                 .oldLayout = vk::ImageLayout::eUndefined,
                 .newLayout = vk::ImageLayout::eGeneral,
-                .image = s.input.image,
+                .image = s.inputs[0].image,
                 .subresourceRange = COLOR_RANGE,
             },
             vk::ImageMemoryBarrier2{
                 .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
                 .oldLayout = vk::ImageLayout::eUndefined,
                 .newLayout = vk::ImageLayout::eGeneral,
-                .image = s.output.image,
+                .image = s.inputs[1].image,
                 .subresourceRange = COLOR_RANGE,
             },
         };
-        scheduler.CommandBuffer().pipelineBarrier2({
-            .imageMemoryBarrierCount = static_cast<u32>(to_general.size()),
-            .pImageMemoryBarriers = to_general.data(),
-        });
+        if (!s.failed) {
+            scheduler.CommandBuffer().pipelineBarrier2({
+                .imageMemoryBarrierCount = static_cast<u32>(to_general.size()),
+                .pImageMemoryBarriers = to_general.data(),
+            });
+        }
     }
     if (s.failed) {
         return nullptr;
     }
+    if (output_changed) {
+        s.DestroyTarget(out);
+        if (!s.CreateTarget(out, output_size, format, OUTPUT_USAGE, *pixel_format)) {
+            s.DestroyTarget(out);
+            return nullptr;
+        }
+        const vk::ImageMemoryBarrier2 to_general{
+            .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+            .oldLayout = vk::ImageLayout::eUndefined,
+            .newLayout = vk::ImageLayout::eGeneral,
+            .image = out.image,
+            .subresourceRange = COLOR_RANGE,
+        };
+        scheduler.CommandBuffer().pipelineBarrier2({
+            .imageMemoryBarrierCount = 1,
+            .pImageMemoryBarriers = &to_general,
+        });
+    }
 
+    const auto& input = s.inputs[(s.serial + 1) % s.inputs.size()];
     const vk::ImageMemoryBarrier2 to_attachment{
         .dstStageMask = vk::PipelineStageFlagBits2::eColorAttachmentOutput,
         .dstAccessMask = vk::AccessFlagBits2::eColorAttachmentWrite,
         .oldLayout = vk::ImageLayout::eGeneral,
         .newLayout = vk::ImageLayout::eColorAttachmentOptimal,
-        .image = s.input.image,
+        .image = input.image,
         .subresourceRange = COLOR_RANGE,
     };
     scheduler.CommandBuffer().pipelineBarrier2({
         .imageMemoryBarrierCount = 1,
         .pImageMemoryBarriers = &to_attachment,
     });
+    s.input_frame.width = input_size.width;
+    s.input_frame.height = input_size.height;
+    s.input_frame.image = input.image;
+    s.input_frame.image_view = input.view;
     return &s.input_frame;
 }
 
 u64 MetalFxPass::Scale(Scheduler& scheduler, const Frame& output) {
     auto& s = *impl;
-    SubmitInfo input_info{};
-    if (s.serial > 0) {
-        input_info.AddWait(*s.done, s.serial);
-    }
     const u64 value = ++s.serial;
-    scheduler.DeferPriorityOperation([&s, value] { s.Encode(value); });
-    scheduler.Flush(input_info);
+    const auto& input = s.inputs[value % s.inputs.size()];
+    const auto& out = s.outputs[output.id];
 
-    const auto cmdbuf = scheduler.CommandBuffer();
+    // The previous scaler that read this input has finished long before in practice; the wait
+    // keeps the reuse ordered without pausing the queue.
+    SubmitInfo input_info{};
+    if (value > s.inputs.size()) {
+        input_info.AddWait(*s.done, value - s.inputs.size());
+    }
+    id<MTLFXSpatialScaler> encode_scaler = [s.scaler retain];
+    id<MTLTexture> input_texture = [input.texture retain];
+    id<MTLTexture> output_texture = [out.texture retain];
+    const vk::Extent2D input_size = s.input_size;
+    scheduler.DeferPriorityOperation(
+        [&s, encode_scaler, input_texture, output_texture, input_size, value] {
+            s.Encode(encode_scaler, input_texture, output_texture, input_size, value);
+        });
+    scheduler.Flush(input_info);
+    return value;
+}
+
+void MetalFxPass::CopyOutput(vk::CommandBuffer cmdbuf, Frame& frame, SubmitInfo& info) {
+    auto& s = *impl;
+    const u64 value = std::exchange(frame.metalfx_value, 0);
+    if (value == 0 || frame.id >= s.outputs.size()) {
+        return;
+    }
+    // Waiting here on the host keeps the queue from ever waiting for the scaler.
+    if (s.WaitDone(value, std::numeric_limits<u64>::max()) != vk::Result::eSuccess) {
+        return;
+    }
+    const auto& out = s.outputs[frame.id];
     const vk::ImageMemoryBarrier2 to_transfer{
         .dstStageMask = vk::PipelineStageFlagBits2::eCopy,
         .dstAccessMask = vk::AccessFlagBits2::eTransferWrite,
         .oldLayout = vk::ImageLayout::eUndefined,
         .newLayout = vk::ImageLayout::eTransferDstOptimal,
-        .image = output.image,
+        .image = frame.image,
         .subresourceRange = COLOR_RANGE,
     };
     cmdbuf.pipelineBarrier2({
         .imageMemoryBarrierCount = 1,
         .pImageMemoryBarriers = &to_transfer,
     });
-    cmdbuf.copyImage(s.output.image, vk::ImageLayout::eGeneral, output.image,
+    cmdbuf.copyImage(out.image, vk::ImageLayout::eGeneral, frame.image,
                      vk::ImageLayout::eTransferDstOptimal,
                      vk::ImageCopy{
                          .srcSubresource = COLOR_LAYERS,
                          .dstSubresource = COLOR_LAYERS,
-                         .extent = {s.output_size.width, s.output_size.height, 1},
+                         .extent = {out.size.width, out.size.height, 1},
                      });
-    const vk::ImageMemoryBarrier2 to_present{
+    const vk::ImageMemoryBarrier2 to_general{
         .srcStageMask = vk::PipelineStageFlagBits2::eCopy,
         .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
         .dstStageMask = vk::PipelineStageFlagBits2::eFragmentShader,
         .dstAccessMask = vk::AccessFlagBits2::eShaderRead,
         .oldLayout = vk::ImageLayout::eTransferDstOptimal,
         .newLayout = vk::ImageLayout::eGeneral,
-        .image = output.image,
+        .image = frame.image,
         .subresourceRange = COLOR_RANGE,
     };
     cmdbuf.pipelineBarrier2({
         .imageMemoryBarrierCount = 1,
-        .pImageMemoryBarriers = &to_present,
+        .pImageMemoryBarriers = &to_general,
     });
-    return value;
-}
-
-vk::Semaphore MetalFxPass::DoneSemaphore() const {
-    return *impl->done;
+    info.AddWait(*s.done, value);
 }
 
 } // namespace Vulkan::HostPasses

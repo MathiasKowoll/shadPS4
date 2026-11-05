@@ -39,6 +39,7 @@ struct Frame {
     u64 ready_tick;
     bool is_hdr{false};
     u8 id{};
+    u64 metalfx_value{};
 
     ImTextureID imgui_texture;
 };
@@ -119,8 +120,7 @@ private:
 
     void RecreateFrame(Frame* frame, u32 width, u32 height);
 
-    bool ScaleWithMetalFx(vk::ImageView image_view, vk::Extent2D image_size, Frame& frame,
-                          SubmitInfo& info);
+    bool ScaleWithMetalFx(vk::ImageView image_view, vk::Extent2D image_size, Frame& frame);
 
     void SetExpectedGameSize(s32 width, s32 height);
 

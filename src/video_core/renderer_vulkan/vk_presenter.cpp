@@ -493,7 +493,7 @@ Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_
     pp_pass.Create(device, swapchain.GetSurfaceFormat().format);
 #ifdef __APPLE__
     metalfx_settings.enable = EmulatorSettings.IsMetalFxEnabled();
-    metalfx_pass.Create(instance);
+    metalfx_pass.Create(instance, num_images);
 #endif
 
     ImGui::Layer::AddLayer(Common::Singleton<Core::Devtools::Layer>::Instance());
@@ -749,8 +749,7 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     pp_settings.srgb_input =
         attribute.attrib.pixel_format == Libraries::VideoOut::PixelFormat::A2R10G10B10Srgb;
 
-    SubmitInfo info{};
-    if (!ScaleWithMetalFx(image_view, image_size, *frame, info)) {
+    if (!ScaleWithMetalFx(image_view, image_size, *frame)) {
         image_view = fsr_pass.Render(draw_scheduler.CommandBuffer(), image_view, image_size,
                                      {frame->width, frame->height}, fsr_settings, frame->is_hdr);
         pp_pass.Render(draw_scheduler.CommandBuffer(), image_view, image_size, *frame, pp_settings);
@@ -769,12 +768,12 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     // Flush frame creation commands.
     frame->ready_semaphore = draw_scheduler.GetWorkSemaphore()->Handle();
     frame->ready_tick = draw_scheduler.CurrentTick();
+    SubmitInfo info{};
     draw_scheduler.Flush(info);
     return frame;
 }
 
-bool Presenter::ScaleWithMetalFx(vk::ImageView image_view, vk::Extent2D image_size, Frame& frame,
-                                 SubmitInfo& info) {
+bool Presenter::ScaleWithMetalFx(vk::ImageView image_view, vk::Extent2D image_size, Frame& frame) {
 #ifdef __APPLE__
     Frame* input = metalfx_pass.BeginInput(draw_scheduler, metalfx_settings, image_size, frame,
                                            swapchain.GetSurfaceFormat().format);
@@ -783,7 +782,7 @@ bool Presenter::ScaleWithMetalFx(vk::ImageView image_view, vk::Extent2D image_si
     }
     DebugState.is_using_fsr = false;
     pp_pass.Render(draw_scheduler.CommandBuffer(), image_view, image_size, *input, pp_settings);
-    info.AddWait(metalfx_pass.DoneSemaphore(), metalfx_pass.Scale(draw_scheduler, frame));
+    frame.metalfx_value = metalfx_pass.Scale(draw_scheduler, frame);
     return true;
 #else
     return false;
@@ -922,6 +921,10 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
 
     auto& scheduler = present_scheduler;
     const auto cmdbuf = scheduler.CommandBuffer();
+    SubmitInfo info{};
+#ifdef __APPLE__
+    metalfx_pass.CopyOutput(cmdbuf, *frame, info);
+#endif
     const u32 capture_with_overlays_count = VideoCore::ConsumeWithOverlaysScreenshotRequests();
     std::optional<ScreenshotReadback> pending_screenshot;
 
@@ -1110,7 +1113,6 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
         });
     }
 
-    SubmitInfo info{};
     info.AddWait(swapchain.GetImageAcquiredSemaphore());
     info.AddWait(frame->ready_semaphore, frame->ready_tick);
     info.AddSignal(swapchain.GetPresentReadySemaphore());
@@ -1166,6 +1168,7 @@ Frame* Presenter::GetRenderFrame() {
         frame->is_hdr != swapchain.GetHDR()) {
         RecreateFrame(frame, expected_frame_width, expected_frame_height);
     }
+    frame->metalfx_value = 0;
 
     return frame;
 }
