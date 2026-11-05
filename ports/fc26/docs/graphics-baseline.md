@@ -118,6 +118,18 @@ the bilinear path compared in the same run with `SHADPS4_METALFX_OFF_FILE`. Not 
 walkout, close player camera, rain match, replay and return to the menu. Frame cost and design are
 in `docs/gpu-thread-research.md`; it stays off by default.
 
+Second recording, same day, with the scaler waited for on the presenting thread (`415fc971`) and
+a warm pipeline cache (8 graphics pipelines compiled in the whole run): Manchester United against
+Liverpool at Old Trafford, in rain. Covered:
+- match intro card, kickoff wide camera and play;
+- replays and their Premier League transitions;
+- close-ups with depth of field, and the high replay camera.
+
+The home goalkeeper wore his own kit, and the user confirmed it in the same run. The high replay
+camera shows straight dark diagonal lines and drops on the lens; they look like the camera's cable
+rig and the rain, but they were not compared with the scaler off. Still not covered: tunnel or
+walkout, a played match from kickoff to the final whistle, and return to the menu.
+
 Tried and removed because they caused regressions or showed no gain: a 64 KB head for unbounded
 buffers in session tracking (exploded crowd-card geometry), the eviction sentinel for clean images
 (lost GPU-made textures: LED boards, ball, goalkeeper legs), render-pass merges for clear flags

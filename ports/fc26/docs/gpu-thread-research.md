@@ -83,6 +83,23 @@ therefore does not keep its attachments on this stack. The base already breaks p
 times per frame for late layout transitions, which makes this a candidate cause of the known
 occasional artifacts in cinematics. The cost of a pass break could not be measured this way.
 
+The switch file can also hold a mode, to narrow down which attachments lose their contents:
+
+| Mode | Passes that are broken |
+|---|---|
+| 1 | every pass |
+| 2 | every pass, plus a full memory barrier |
+| 3 | passes without a depth or stencil attachment |
+| 4 | passes with a depth or stencil attachment |
+| 5 | single-sample passes |
+| 6 | multisampled passes |
+
+A later match on the same day ran each mode for seven seconds, in replays, close-ups and the wide
+camera. None of the saved images showed noise tiles, so the corruption is not yet tied to one kind
+of attachment. Mode 1 never ran in play in that match, so mode 2's clean play frames say nothing
+about the barrier yet. The noise appeared within 30-second windows of play, so each mode needs at
+least that long in play.
+
 ## Ranked options
 
 Expected gains are for CPU-bound play scenes, where frame time follows the GPU command thread.
@@ -128,22 +145,40 @@ enabled presents 3200x1800 pixels.
   runs at 1920x1080 when MetalFX scales afterwards.
 - Pause menu over a 3D stadium (CPU bound, 1000-1500 draws): 30.5 and 38.7 FPS with MetalFX, 27.8
   and 34.7 without, in the two comparable pairs.
-- Match play: equal when vsync bound (60.0 and 59.9). In the comparable CPU-bound pair, 50.1 FPS
-  with MetalFX and 59.3 without, with 320 instead of 175 ms per second spent in CPU waits for GPU
-  results. The Vulkan queue waits at queue level for the scaler, whose start and completion go
-  through host wake-ups, and every later CPU wait for GPU results queues behind that pause. Waiting
-  on the presenting thread instead (copy the output in `Present` after a host wait), or a
-  GPU-side dependency, would keep the game's queue running; the latter needs the `MTLSharedEvent`
-  behind a Vulkan semaphore, which KosmicKrisp does not export (no `VK_EXT_metal_objects`).
-- Visual: correct in menus, Kick Off, pause and play at 3200x1800, no Metal command buffer errors;
-  UI text and thin structures are sharper than with the bilinear pass.
+- Match play with the first design: equal when vsync bound (60.0 and 59.9). In the comparable
+  CPU-bound pair, 50.1 FPS with MetalFX and 59.3 without, with 320 instead of 175 ms per second
+  spent in CPU waits for GPU results. The Vulkan queue waited at queue level for the scaler, whose
+  start and completion go through host wake-ups, and every later CPU wait for GPU results queued
+  behind that pause. A GPU-side dependency would need the `MTLSharedEvent` behind a Vulkan
+  semaphore, which KosmicKrisp does not export (no `VK_EXT_metal_objects`).
+- Match play with the current design (the presenting thread waits for the scaler and copies its
+  output in `Present`), four alternating 30-second pairs:
 
-The option stays off by default until the queue pause is removed.
+  | Pair | MetalFX on: FPS, draws per frame | Off: FPS, draws per frame | CPU waits for GPU results, on / off (ms per second) |
+  |---|---|---|---|
+  | 1 | 33.8, 853 | 52.4, 400 | 222 / 224 |
+  | 2 | 36.3, 932 | 54.2, 428 | 241 / 193 |
+  | 3 | 42.6, 917 | 51.4, 513 | 220 / 211 |
+  | 4 | 60.0, 471 | 60.0, 470 | 182 / 174 |
+
+  In pairs 1-3 the MetalFX windows fell on replays and close cameras, with about twice the game's
+  draws per frame. A presentation pass cannot change the draw count, so those pairs compare
+  scenes, not the scaler. Pair 4 is the same scene: 60.0 FPS in both arms, vsync bound. The CPU
+  waits for GPU results stayed close in every pair, even in the heavier MetalFX scenes, so the
+  queue pause of the first design is gone. A CPU-bound pair in one scene is still missing.
+- Visual: correct in menus, Kick Off, pause and play at 3200x1800, no Metal command buffer errors;
+  UI text and thin structures are sharper than with the bilinear pass. The current design was also
+  seen in the match intro, replays and their transitions, close-ups with depth of field, and the
+  high replay camera in rain.
+
+The option stays off by default until it is validated in a played match.
 
 ## Commits and switches
 
 - `presenter: add an optional MetalFX spatial upscaler on macOS` (`GPU.metalfx_enabled`,
   `FC26_METALFX`, `SHADPS4_METALFX_OFF_FILE`).
 - `rasterizer: add a diagnostic switch that breaks every 12th render pass`
-  (`SHADPS4_EXTRA_PASS_SPLIT_FILE`; see above, it corrupts the image).
+  (`SHADPS4_EXTRA_PASS_SPLIT_FILE`; see above, it corrupts the image), and
+  `rasterizer: let the pass break switch pick which passes it breaks` (the modes above).
 - `presenter: add a diagnostic screenshot request file` (`SHADPS4_SCREENSHOT_FILE`).
+- `presenter: wait for MetalFX on the present thread` (the current design).

@@ -137,14 +137,15 @@ toggled in the developer menu under Display > MetalFX.
 - KosmicKrisp has no `VK_EXT_metal_objects`. The scaler images are allocated as dedicated memory
   whose MTLHeap is exported with `VK_EXT_external_memory_metal`; a Metal texture with the same
   descriptor KosmicKrisp uses is placed at offset 0 of that heap. The post-processing pass renders
-  the game image into the input at 1920x1080, MetalFX runs on its own Metal queue after that
-  submission completes, and the copy into the presented frame waits for a timeline semaphore
-  that the Metal command buffer signals from the host when it finishes.
+  the game image into the input at 1920x1080, and MetalFX runs on its own Metal queue after that
+  submission completes. The Metal command buffer signals a timeline semaphore from the host when
+  it finishes; the presenting thread waits for that value before it copies the output into the
+  presented frame, so the game's Vulkan queue never waits for the scaler.
 - `SHADPS4_METALFX_OFF_FILE=<path>` is a diagnostic A/B switch: while the file exists, frames use
   the regular presentation path in the same run.
-- It costs nothing while the game is vsync bound, but in CPU-bound play it currently costs frames:
-  the game's Vulkan queue pauses until the scaler finishes, which lengthens the emulator's waits for
-  GPU results. Measurements and the planned fix are in `docs/gpu-thread-research.md`.
+- In the same play scene with vsync it held 60.0 FPS with and without the scaler, and the
+  emulator's waits for GPU results were about the same. A CPU-bound comparison in one scene is
+  still missing. Measurements are in `docs/gpu-thread-research.md`.
 
 ## Shader cache
 
