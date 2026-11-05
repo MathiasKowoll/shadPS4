@@ -110,6 +110,14 @@ they join it:
 3. Play still drops below 60 in heavier camera angles; the GPU thread (`GpuCommandProcessor`) is
    the bottleneck at 80-90% of a core while the Mac GPU sits near 55%.
 
+### Pending option: MetalFX upscaling (not part of the base)
+
+Branch `fc26-perf-metalfx`, recorded on 2026-11-05 with a 1600x900 point window (3200x1800
+pixels). Covered: main menu, Kick Off screen, kickoff wide camera and play, pause menu; MetalFX and
+the bilinear path compared in the same run with `SHADPS4_METALFX_OFF_FILE`. Not covered: tunnel or
+walkout, close player camera, rain match, replay and return to the menu. Frame cost and design are
+in `docs/gpu-thread-research.md`; it stays off by default.
+
 Tried and removed because they caused regressions or showed no gain: a 64 KB head for unbounded
 buffers in session tracking (exploded crowd-card geometry), the eviction sentinel for clean images
 (lost GPU-made textures: LED boards, ball, goalkeeper legs), render-pass merges for clear flags

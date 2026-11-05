@@ -142,6 +142,9 @@ toggled in the developer menu under Display > MetalFX.
   that the Metal command buffer signals from the host when it finishes.
 - `SHADPS4_METALFX_OFF_FILE=<path>` is a diagnostic A/B switch: while the file exists, frames use
   the regular presentation path in the same run.
+- It costs nothing while the game is vsync bound, but in CPU-bound play it currently costs frames:
+  the game's Vulkan queue pauses until the scaler finishes, which lengthens the emulator's waits for
+  GPU results. Measurements and the planned fix are in `docs/gpu-thread-research.md`.
 
 ## Shader cache
 

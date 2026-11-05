@@ -1,0 +1,456 @@
+KosmicKrisp research prototype for the FC26 port: Metal encoding on a submit thread.
+Applies with git apply inside externals/mesa-kosmickrisp/externals/mesa at
+1c853169eff74d19a521094ac26964acb4652e93. Opt-in with KK_DEFERRED_ENCODING=1;
+KK_DEFERRED_ENCODING_OFF_FILE names an in-run A/B switch file. Measurements are in
+ports/fc26/docs/gpu-thread-research.md. Not for upstream submission.
+Generated-by: LLM
+
+diff --git a/src/kosmickrisp/util/kk_dispatch_cmd_gen.py b/src/kosmickrisp/util/kk_dispatch_cmd_gen.py
+index 562e277..19d418d 100644
+--- a/src/kosmickrisp/util/kk_dispatch_cmd_gen.py
++++ b/src/kosmickrisp/util/kk_dispatch_cmd_gen.py
+@@ -83,8 +83,9 @@ ${e.prefixed_name('kk_cmd_tramp')}(${e.decl_params()})
+       return;
+     }
+ 
+-    dev->vk.dispatch_table.${e.name}(${e.call_params()});
+-    if (!cmd->one_time_submit) {
++    if (!cmd->deferred)
++      dev->vk.dispatch_table.${e.name}(${e.call_params()});
++    if (!cmd->one_time_submit || cmd->deferred) {
+       vk_cmd_enqueue_device_entrypoints.${e.name}(${e.call_params()});
+     }
+     % else:
+@@ -92,11 +93,14 @@ ${e.prefixed_name('kk_cmd_tramp')}(${e.decl_params()})
+       return vk_cmd_enqueue_unless_primary_device_entrypoints.${e.name}(${e.call_params()});
+     }
+ 
+-    VkResult result = dev->vk.dispatch_table.${e.name}(${e.call_params()});
+-    if (result != VK_SUCCESS)
+-      return result;
++    VkResult result = VK_SUCCESS;
++    if (!cmd->deferred) {
++      result = dev->vk.dispatch_table.${e.name}(${e.call_params()});
++      if (result != VK_SUCCESS)
++        return result;
++    }
+ 
+-    if (!cmd->one_time_submit) {
++    if (!cmd->one_time_submit || cmd->deferred) {
+       result = vk_cmd_enqueue_device_entrypoints.${e.name}(${e.call_params()});
+     }
+     return result;
+diff --git a/src/kosmickrisp/vulkan/kk_cmd_buffer.c b/src/kosmickrisp/vulkan/kk_cmd_buffer.c
+index 22f4bf7..8e2f765 100644
+--- a/src/kosmickrisp/vulkan/kk_cmd_buffer.c
++++ b/src/kosmickrisp/vulkan/kk_cmd_buffer.c
+@@ -10,6 +10,8 @@
+ #include "kk_buffer.h"
+ #include "kk_cmd_pool.h"
+ #include "kk_descriptor_set_layout.h"
++#include "kk_device.h"
++#include "kk_queue.h"
+ #include "kk_entrypoints.h"
+ #include "kk_format.h"
+ #include "kk_image_view.h"
+@@ -183,6 +185,7 @@ kk_reset_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer,
+    vk_command_buffer_reset(&cmd->vk);
+    cmd->submitted = false;
+    cmd->one_time_submit = false;
++   cmd->deferred = false;
+ }
+ 
+ const struct vk_command_buffer_ops kk_cmd_buffer_ops = {
+@@ -214,6 +217,9 @@ kk_BeginCommandBuffer(VkCommandBuffer commandBuffer,
+    vk_command_buffer_begin(&cmd->vk, pBeginInfo);
+    cmd->one_time_submit =
+       pBeginInfo->flags & VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
++   cmd->deferred = cmd->vk.level == VK_COMMAND_BUFFER_LEVEL_PRIMARY &&
++                   pool != kk_cmd_buffer_device(cmd)->queue.cmd_pool &&
++                   kk_queue_defers_encoding(&kk_cmd_buffer_device(cmd)->queue);
+ 
+    /* vk_command_buffer_begin will reset the command buffer meaning the
+     * allocator may be returned to the pool. Request a new one. */
+diff --git a/src/kosmickrisp/vulkan/kk_cmd_buffer.h b/src/kosmickrisp/vulkan/kk_cmd_buffer.h
+index 20e5854..ff80adb 100644
+--- a/src/kosmickrisp/vulkan/kk_cmd_buffer.h
++++ b/src/kosmickrisp/vulkan/kk_cmd_buffer.h
+@@ -279,6 +279,9 @@ struct kk_cmd_buffer {
+    /* Metal command buffers are single-shot: a resubmission must re-record
+     * by replaying the enqueued commands (see rerecord_cmd_buffer). */
+    bool submitted;
++   /* Set at vkBeginCommandBuffer when the queue encodes on its submit thread:
++    * commands are only enqueued and get encoded by the replay at submission. */
++   bool deferred;
+ };
+ 
+ VK_DEFINE_HANDLE_CASTS(kk_cmd_buffer, vk.base, VkCommandBuffer,
+diff --git a/src/kosmickrisp/vulkan/kk_queue.c b/src/kosmickrisp/vulkan/kk_queue.c
+index 5194492..7e3de43 100644
+--- a/src/kosmickrisp/vulkan/kk_queue.c
++++ b/src/kosmickrisp/vulkan/kk_queue.c
+@@ -17,7 +17,13 @@
+ #include "kosmickrisp/bridge/vk_to_mtl_map.h"
+ 
+ #include "vk_cmd_queue.h"
++#include "vk_enum_to_str.h"
+ 
++#include "util/os_misc.h"
++#include "util/os_time.h"
++#include "util/u_thread.h"
++
++#include <unistd.h>
+ struct kk_commit_data {
+    struct kk_queue *queue;
+    struct kk_cmd_buffer *cmd;
+@@ -251,72 +257,233 @@ kk_queue_submit_bind_sparse_memory(struct kk_device *device,
+    return VK_SUCCESS;
+ }
+ 
+-static VkResult
+-kk_queue_submit(struct vk_queue *vk_queue, struct vk_queue_submit *submit)
++struct kk_event_op {
++   mtl_shared_event *event;
++   uint64_t value;
++};
++
++/* Everything a submission needs after vk_queue_submit has been freed. */
++struct kk_submit_job {
++   struct list_head link;
++   uint32_t wait_count;
++   uint32_t cmd_count;
++   uint32_t signal_count;
++   bool has_drawable;
++   struct kk_event_op *waits;
++   struct kk_event_op *signals;
++   struct kk_cmd_buffer **cmds;
++   void **drawables;
++};
++
++static struct kk_submit_job *
++kk_submit_job_create(struct kk_queue *queue, struct vk_queue_submit *submit)
+ {
+-   struct kk_queue *queue = container_of(vk_queue, struct kk_queue, vk);
+    struct kk_device *dev = kk_queue_device(queue);
++   const size_t size =
++      sizeof(struct kk_submit_job) +
++      (submit->wait_count + submit->signal_count) * sizeof(struct kk_event_op) +
++      submit->command_buffer_count *
++         (sizeof(struct kk_cmd_buffer *) + sizeof(void *));
++   struct kk_submit_job *job =
++      vk_zalloc(&dev->vk.alloc, size, 8, VK_SYSTEM_ALLOCATION_SCOPE_DEVICE);
++   if (job == NULL)
++      return NULL;
++
++   char *data = (char *)(job + 1);
++   job->waits = (struct kk_event_op *)data;
++   data += submit->wait_count * sizeof(struct kk_event_op);
++   job->signals = (struct kk_event_op *)data;
++   data += submit->signal_count * sizeof(struct kk_event_op);
++   job->cmds = (struct kk_cmd_buffer **)data;
++   data += submit->command_buffer_count * sizeof(struct kk_cmd_buffer *);
++   job->drawables = (void **)data;
++
++   job->wait_count = submit->wait_count;
++   for (uint32_t i = 0; i < submit->wait_count; ++i) {
++      struct kk_sync_timeline *sync =
++         container_of(submit->waits[i].sync, struct kk_sync_timeline, base);
++      job->waits[i].event = mtl_retain(sync->mtl_handle);
++      job->waits[i].value = submit->waits[i].wait_value;
++   }
+ 
+-   if (vk_queue_is_lost(&queue->vk))
+-      return VK_ERROR_DEVICE_LOST;
+-
+-   for (struct vk_sync_wait *wait = submit->waits,
+-                            *end = submit->waits + submit->wait_count;
+-        wait != end; ++wait) {
++   job->signal_count = submit->signal_count;
++   for (uint32_t i = 0; i < submit->signal_count; ++i) {
+       struct kk_sync_timeline *sync =
+-         container_of(wait->sync, struct kk_sync_timeline, base);
+-      mtl_wait_for_event(queue->mtl_handle, sync->mtl_handle, wait->wait_value);
++         container_of(submit->signals[i].sync, struct kk_sync_timeline, base);
++      job->signals[i].event = mtl_retain(sync->mtl_handle);
++      job->signals[i].value = submit->signals[i].signal_value;
++   }
++
++   job->cmd_count = submit->command_buffer_count;
++   for (uint32_t i = 0; i < submit->command_buffer_count; ++i) {
++      struct kk_cmd_buffer *cmd =
++         container_of(submit->command_buffers[i], struct kk_cmd_buffer, vk);
++      job->cmds[i] = cmd;
++      /* The job owns the drawable reference from here on. */
++      job->drawables[i] = cmd->drawable;
++      cmd->drawable = NULL;
++      job->has_drawable |= job->drawables[i] != NULL;
+    }
+ 
++   return job;
++}
++
++static VkResult
++kk_queue_execute_job(struct kk_queue *queue, struct kk_submit_job *job,
++                     struct vk_queue_submit *binds)
++{
++   struct kk_device *dev = kk_queue_device(queue);
++   VkResult result = VK_SUCCESS;
++
++   for (uint32_t i = 0; i < job->wait_count; ++i)
++      mtl_wait_for_event(queue->mtl_handle, job->waits[i].event,
++                         job->waits[i].value);
++
+    /* Ensure any changes to residency are propagated before we submit any
+     * work. All resources should have been allocated before submission.
+     * Otherwise, users are playing with fire. */
+    kk_device_make_resources_resident(dev);
+ 
+-   if (submit->buffer_bind_count || submit->image_bind_count ||
+-       submit->image_opaque_bind_count) {
+-      VkResult result = kk_queue_submit_bind_sparse_memory(dev, queue, submit);
++   if (binds != NULL) {
++      result = kk_queue_submit_bind_sparse_memory(dev, queue, binds);
+       if (result != VK_SUCCESS)
+-         return result;
++         goto out;
+    }
+ 
+-   for (uint32_t i = 0; i < submit->command_buffer_count; ++i) {
+-      struct kk_cmd_buffer *cmd_buffer =
+-         container_of(submit->command_buffers[i], struct kk_cmd_buffer, vk);
++   for (uint32_t i = 0; i < job->cmd_count; ++i) {
++      struct kk_cmd_buffer *cmd_buffer = job->cmds[i];
++      void *drawable = job->drawables[i];
+ 
+-      if (cmd_buffer->drawable) {
+-         mtl_command_queue_wait_for_drawable(queue->mtl_handle,
+-                                             cmd_buffer->drawable);
+-      }
++      if (drawable)
++         mtl_command_queue_wait_for_drawable(queue->mtl_handle, drawable);
+ 
+       /* Metal's command buffers are one time use, re-record multiple
+-       * submissions. */
+-      if (cmd_buffer->submitted) {
+-         VkResult result = rerecord_and_commit_cmd_buffer(queue, cmd_buffer);
++       * submissions. Deferred command buffers only hold enqueued commands
++       * and are encoded by the replay. */
++      if (cmd_buffer->submitted || cmd_buffer->deferred) {
++         result = rerecord_and_commit_cmd_buffer(queue, cmd_buffer);
+          if (result != VK_SUCCESS)
+-            return result;
++            goto out;
+       } else if (kk_cmd_buffer_has_work(cmd_buffer)) {
+          kk_queue_commit(queue, cmd_buffer, commit_callback, dev);
+       }
+ 
+       cmd_buffer->submitted = true;
+ 
+-      if (cmd_buffer->drawable) {
+-         mtl_command_queue_signal_drawable(queue->mtl_handle,
+-                                           cmd_buffer->drawable);
+-         mtl_release(cmd_buffer->drawable);
+-         cmd_buffer->drawable = NULL;
++      if (drawable) {
++         mtl_command_queue_signal_drawable(queue->mtl_handle, drawable);
++         mtl_release(drawable);
++         job->drawables[i] = NULL;
+       }
+    }
+ 
+-   for (uint32_t i = 0u; i < submit->signal_count; ++i) {
+-      struct vk_sync_signal *signal = &submit->signals[i];
+-      struct kk_sync_timeline *sync =
+-         container_of(signal->sync, struct kk_sync_timeline, base);
+-      mtl_signal_event(queue->mtl_handle, sync->mtl_handle,
+-                       signal->signal_value);
++   for (uint32_t i = 0u; i < job->signal_count; ++i)
++      mtl_signal_event(queue->mtl_handle, job->signals[i].event,
++                       job->signals[i].value);
++
++out:
++   for (uint32_t i = 0; i < job->wait_count; ++i)
++      mtl_release(job->waits[i].event);
++   for (uint32_t i = 0; i < job->signal_count; ++i)
++      mtl_release(job->signals[i].event);
++   for (uint32_t i = 0; i < job->cmd_count; ++i) {
++      if (job->drawables[i])
++         mtl_release(job->drawables[i]);
++   }
++   vk_free(&dev->vk.alloc, job);
++   return result;
++}
++
++static int
++kk_queue_worker(void *data)
++{
++   struct kk_queue *queue = data;
++   u_thread_setname("kk-submit");
++
++   mtx_lock(&queue->jobs_mutex);
++   while (true) {
++      while (list_is_empty(&queue->jobs) && !queue->worker_stop)
++         cnd_wait(&queue->jobs_cond, &queue->jobs_mutex);
++      if (list_is_empty(&queue->jobs))
++         break;
++
++      struct kk_submit_job *job =
++         list_first_entry(&queue->jobs, struct kk_submit_job, link);
++      list_del(&job->link);
++      mtx_unlock(&queue->jobs_mutex);
++
++      VkResult result = kk_queue_execute_job(queue, job, NULL);
++      if (result != VK_SUCCESS)
++         vk_queue_set_lost(&queue->vk, "Deferred submission failed: %s",
++                           vk_Result_to_str(result));
++
++      mtx_lock(&queue->jobs_mutex);
++      if (--queue->jobs_pending == 0)
++         cnd_broadcast(&queue->jobs_idle);
++   }
++   mtx_unlock(&queue->jobs_mutex);
++   return 0;
++}
++
++static void
++kk_queue_drain(struct kk_queue *queue)
++{
++   if (!queue->deferred)
++      return;
++
++   mtx_lock(&queue->jobs_mutex);
++   while (queue->jobs_pending > 0)
++      cnd_wait(&queue->jobs_idle, &queue->jobs_mutex);
++   mtx_unlock(&queue->jobs_mutex);
++}
++
++bool
++kk_queue_defers_encoding(struct kk_queue *queue)
++{
++   if (!queue->deferred)
++      return false;
++   if (queue->deferred_off_file == NULL || queue->deferred_off_file[0] == '\0')
++      return true;
++
++   const uint64_t now = os_time_get_nano();
++   if (now >= queue->deferred_next_check_ns) {
++      queue->deferred_next_check_ns = now + 500000000ull;
++      queue->deferred_off = access(queue->deferred_off_file, F_OK) == 0;
++   }
++   return !queue->deferred_off;
++}
++
++static VkResult
++kk_queue_submit(struct vk_queue *vk_queue, struct vk_queue_submit *submit)
++{
++   struct kk_queue *queue = container_of(vk_queue, struct kk_queue, vk);
++
++   if (vk_queue_is_lost(&queue->vk))
++      return VK_ERROR_DEVICE_LOST;
++
++   struct kk_submit_job *job = kk_submit_job_create(queue, submit);
++   if (job == NULL)
++      return vk_error(queue, VK_ERROR_OUT_OF_HOST_MEMORY);
++
++   const bool binds = submit->buffer_bind_count || submit->image_bind_count ||
++                      submit->image_opaque_bind_count;
++   if (!queue->deferred || binds) {
++      kk_queue_drain(queue);
++      return kk_queue_execute_job(queue, job, binds ? submit : NULL);
+    }
+ 
++   const bool presents = job->has_drawable;
++   mtx_lock(&queue->jobs_mutex);
++   list_addtail(&job->link, &queue->jobs);
++   queue->jobs_pending++;
++   cnd_signal(&queue->jobs_cond);
++   mtx_unlock(&queue->jobs_mutex);
++
++   /* The WSI presents the drawable as soon as this returns, which has to
++    * follow the drawable signal. */
++   if (presents)
++      kk_queue_drain(queue);
++
+    return VK_SUCCESS;
+ }
+ 
+@@ -378,12 +545,35 @@ kk_queue_init(struct kk_device *dev, struct kk_queue *queue,
+ 
+    queue->vk.driver_submit = kk_queue_submit;
+ 
++   const char *deferred = os_get_option("KK_DEFERRED_ENCODING");
++   if (deferred != NULL && deferred[0] == '1') {
++      list_inithead(&queue->jobs);
++      mtx_init(&queue->jobs_mutex, mtx_plain);
++      cnd_init(&queue->jobs_cond);
++      cnd_init(&queue->jobs_idle);
++      queue->deferred_off_file = os_get_option("KK_DEFERRED_ENCODING_OFF_FILE");
++      queue->deferred =
++         thrd_create(&queue->worker, kk_queue_worker, queue) == thrd_success;
++   }
++
+    return VK_SUCCESS;
+ }
+ 
+ void
+ kk_queue_finish(struct kk_device *dev, struct kk_queue *queue)
+ {
++   if (queue->deferred) {
++      mtx_lock(&queue->jobs_mutex);
++      queue->worker_stop = true;
++      cnd_signal(&queue->jobs_cond);
++      mtx_unlock(&queue->jobs_mutex);
++      thrd_join(queue->worker, NULL);
++      cnd_destroy(&queue->jobs_idle);
++      cnd_destroy(&queue->jobs_cond);
++      mtx_destroy(&queue->jobs_mutex);
++      queue->deferred = false;
++   }
++
+    /* There may be in-flight command buffers, wait for them to finish. */
+    kk_queue_wait_for_commits(queue);
+ 
+diff --git a/src/kosmickrisp/vulkan/kk_queue.h b/src/kosmickrisp/vulkan/kk_queue.h
+index ddc9a3c..96028fd 100644
+--- a/src/kosmickrisp/vulkan/kk_queue.h
++++ b/src/kosmickrisp/vulkan/kk_queue.h
+@@ -16,6 +16,8 @@
+ 
+ #include "vk_queue.h"
+ 
++#include "util/list.h"
++
+ #include "c11/threads.h"
+ 
+ struct kk_queue {
+@@ -31,6 +33,23 @@ struct kk_queue {
+    uint32_t commits_in_flight;
+    mtx_t mutex;
+    cnd_t cond;
++
++   /* KK_DEFERRED_ENCODING=1: submissions are executed in order by a worker
++    * thread, which also encodes the Metal commands of deferred command
++    * buffers by replaying them, so the recording thread only enqueues. While
++    * the file named by KK_DEFERRED_ENCODING_OFF_FILE exists, new command
++    * buffers are encoded at record time again. */
++   bool deferred;
++   const char *deferred_off_file;
++   bool deferred_off;
++   uint64_t deferred_next_check_ns;
++   thrd_t worker;
++   mtx_t jobs_mutex;
++   cnd_t jobs_cond;
++   cnd_t jobs_idle;
++   struct list_head jobs;
++   uint32_t jobs_pending;
++   bool worker_stop;
+ };
+ 
+ static inline struct kk_device *
+@@ -45,4 +64,6 @@ VkResult kk_queue_init(struct kk_device *dev, struct kk_queue *queue,
+ 
+ void kk_queue_finish(struct kk_device *dev, struct kk_queue *queue);
+ 
++bool kk_queue_defers_encoding(struct kk_queue *queue);
++
+ #endif
