@@ -53,6 +53,18 @@ for artifact in shadps4 libvulkan.dylib libvulkan_kosmickrisp.dylib \
     fi
 done
 
+engine_revision=$(git -C "$repo_dir" rev-parse --short=12 HEAD)
+if [[ -n $(git -C "$repo_dir" status --porcelain --untracked-files=no) ]]; then
+    engine_revision+=-dirty
+fi
+cat >"$build_dir/fc26-build-info.json" <<EOF
+{
+  "built_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "engine_revision": "$engine_revision",
+  "kosmickrisp_revision": "$(git -C "$repo_dir/externals/mesa-kosmickrisp" rev-parse --short=12 HEAD)"
+}
+EOF
+
 file "$build_dir/shadps4"
 echo "FC26 port engine built from $(git -C "$repo_dir" rev-parse --short HEAD)"
 echo "Build directory: $build_dir"

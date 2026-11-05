@@ -151,6 +151,110 @@ toggled in the developer menu under Display > MetalFX.
   emulator's waits for GPU results were about the same. A CPU-bound comparison in one scene is
   still missing. Measurements are in `docs/gpu-thread-research.md`.
 
+## Player launcher
+
+`scripts/install_launcher.sh` installs the development launcher, which runs this worktree's
+`run.sh`. For other players, `scripts/package.sh` assembles a self-contained application around a
+native launcher, so a player needs only the app, their own dump of `CUSA52342` 01.25 and,
+optionally, system modules dumped from their own PS4:
+
+```sh
+FC26_BUILD_DIR=/path/to/engine-build ports/fc26/scripts/package.sh
+```
+
+The script compiles the SwiftUI launcher in `launcher/Sources/` for arm64 and writes
+`FC26Port-<version>-<engine revision>-macos-arm64/` with the application, a zip archive and its
+SHA-256. It never overwrites an existing package. The application contains:
+
+- `Contents/MacOS/`: the launcher, the x86-64 `shadps4` engine, the `libvulkan.dylib` loader and
+  `libvulkan_kosmickrisp.dylib`, with debug symbols stripped, plus a link to the KosmicKrisp ICD.
+  The engine points the Vulkan loader at its own folder, so the ICD must be reachable there.
+- `Contents/Resources/`: `profile.json`, the port's `managed.json`, the ICD, `build-info.json` with
+  the engine and KosmicKrisp revisions, and `licenses/` copied from the engine source tree.
+
+Nothing from the game is packaged. The script stops if the bundle contains game files, firmware
+modules or shader binaries, and it stops if a binary embeds `/Users/` or `/Volumes/` paths.
+`build.sh` records the revision it built in `fc26-build-info.json` in the build directory; for
+older builds the script reports the source checkout's current revision instead.
+
+Variables:
+
+- `FC26_BUILD_DIR`: engine build directory with `shadps4`, both dylibs and the ICD.
+- `FC26_PACKAGE_DIR`: output directory; defaults to
+  `/Volumes/CrucialX8/Emulation/Ps4/FC26/port-package`.
+- `FC26_SIGN_IDENTITY`: `-` (the default) signs ad hoc; see signing below.
+- `FC26_PACKAGE_ALLOW_BUILD_PATHS`: `1` allows a local test package whose binaries still contain
+  source paths from assertion messages. Current builds contain them; see the checklist below.
+
+### What the launcher does
+
+1. Game folder: reads `sce_sys/param.sfo` and checks the title ID, the app version and the size of
+   every profiled file against `profile.json`. It accepts a merged dump or a base dump with the
+   update next to it as `CUSA52342-UPDATE` or `CUSA52342-patch`, the layout the engine overlays.
+   Errors name the problem: another game, an older or newer version, a missing or truncated file.
+   SHA-256 verification runs in the background and is remembered while the files are unchanged; a
+   mismatch is a warning, because a dumper can write the same content differently.
+2. Player data: one folder per player, by default
+   `~/Library/Application Support/FC26 Port/Players/<name>`, or any folder the player chooses. It
+   holds the engine's portable `user/` directory (settings, saves, system modules, shader cache),
+   `logs/`, `metrics/`, `shader-cache/` and `launcher.json`. The first use seeds
+   `user/config.json` from `managed.json`. Game and player folders may not contain each other.
+3. System modules: shows whether `libSceJson.sprx`, `libSceJson2.sprx` and `libSceAudiodec.sprx`
+   are in `user/sys_modules/`, explains that they come from the player's own console, and copies
+   chosen `.sprx` files there after checking for an ELF or SELF header. Missing modules are a
+   warning, shown once before the first run, as in `run.sh`.
+4. Settings: fullscreen, frame-rate counter, FSR, RCAS (only with FSR), the Metal HUD and a
+   detailed log, all off except the frame-rate counter. Engine settings live in the player's
+   `user/config.json`; the Metal HUD and log choices in `launcher.json`.
+5. Play: applies the defaults of `run.sh`'s performance profile (60 Hz vblank, flip-rate override
+   0, logging off or the diagnostic filter, `SHADPS4_DEFER_UPLOADS`, `SHADPS4_ASYNC_IMAGE_READBACK`
+   and `SHADPS4_FAULT_EXPAND` set to 1, frame metrics in `metrics/last-run.csv`) and starts the
+   engine from the player folder. It refuses to start without Rosetta 2, while another `shadps4`
+   runs, or while another launcher uses the same player folder. The first run with an empty
+   shader cache explains that early runs stutter while shaders compile.
+6. Shader cache: before and after every run the launcher tests `user/cache/CUSA52342.zip`. A
+   valid archive is copied to `shader-cache/backup.zip`; an archive left incomplete by a crash is
+   preserved under `shader-cache/partial/` and replaced by that backup, or by the latest
+   `run.sh` snapshot in a development data folder.
+7. Logs: each run writes `logs/last-run.console.log` with a header naming the engine revision,
+   game, player folder and settings, and keeps the previous run next to it. The detailed log goes
+   to `user/log/`. The launcher shows both, and the exit code after an unexpected stop.
+
+Players need Apple silicon, macOS 26 or later (the engine's deployment target) and Rosetta 2;
+the launcher shows the `softwareupdate --install-rosetta --agree-to-license` command when Rosetta
+is missing. It stores the chosen game folder and recent players in the user defaults of
+`com.mathiaskowoll.fc26-port`.
+
+### Signing and notarization
+
+The default ad-hoc signature is enough on the Mac that built the package. A copy downloaded from
+the internet is quarantined and Gatekeeper blocks it until the player chooses Open Anyway in
+System Settings > Privacy & Security, or removes the attribute with
+`xattr -dr com.apple.quarantine "EA SPORTS FC 26 Port.app"`.
+
+When the game or the player folder is on an external drive, macOS asks once whether the launcher
+may access files on removable volumes; the engine inherits that permission. An ad-hoc signature
+is a new identity for these privacy settings, so macOS asks again after every rebuild or update.
+
+To avoid both, sign with a Developer ID and notarize. `FC26_SIGN_IDENTITY="Developer ID
+Application: <name> (<team>)"` signs every binary with the hardened runtime and gives the engine
+`launcher/engine.entitlements`: `allow-dyld-environment-variables` because the launcher passes
+`DYLD_LIBRARY_PATH`, `allow-unsigned-executable-memory` for the guest code the engine maps,
+`disable-library-validation`, and `audio-input`. This path has not been validated with the engine
+yet; test a signed package through a full boot before notarizing it with
+`xcrun notarytool submit <zip> --keychain-profile <profile> --wait`, then
+`xcrun stapler staple` the application and archive it again.
+
+### Before publishing
+
+- Package from a clean engine build of a pushed revision, so the GPL source of the binaries is
+  available; `build-info.json` and the archive name record the revision.
+- Rebuild `shadps4` and KosmicKrisp with source path remapping (`-ffile-prefix-map`); until then
+  `package.sh` stops on the source paths in their assertion messages. KosmicKrisp is built by
+  Meson through `externals/mesa-kosmickrisp`, which has no option for extra compiler flags yet.
+- Review the third-party licenses collected in `Contents/Resources/licenses/`.
+- Choose between ad-hoc signing and Developer ID with notarization.
+
 ## Shader cache
 
 Every run preserves validated, content-addressed snapshots of the FC26 shader and pipeline cache.
