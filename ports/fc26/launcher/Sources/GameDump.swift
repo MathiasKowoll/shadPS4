@@ -147,6 +147,13 @@ enum GameDumpInspector {
         if let update {
             notes.append("Update folder found next to the game: \(update.lastPathComponent).")
         }
+        let mods = sibling(of: base, suffix: "-mods")
+        if isDirectory(mods) {
+            notes.append(
+                "A mods folder (\(mods.lastPathComponent)) is next to the game. The engine loads its "
+                    + "files over the game; the launcher does not check them, and the port is only "
+                    + "validated without mods.")
+        }
 
         let sfoURL = GameDump.resolve(paramSFO, base: base, update: update)
         var sfo: [String: String] = [:]
@@ -157,8 +164,9 @@ enum GameDumpInspector {
         } else {
             do {
                 sfo = try ParamSFO.read(sfoURL)
-            } catch where isPermissionError(error) {
-                problems.append("macOS does not let the launcher read the game folder. \(accessHint)")
+            } catch  where isPermissionError(error) {
+                problems.append(
+                    "macOS does not let the launcher read the game folder. \(accessHint)")
             } catch {
                 problems.append(
                     "sce_sys/param.sfo cannot be read (\(error.localizedDescription)). The dump may "
@@ -171,14 +179,17 @@ enum GameDumpInspector {
         let title = sfo["TITLE"] ?? ""
         if problems.isEmpty {
             if titleID != profile.titleID {
-                let found = title.isEmpty ? (titleID.isEmpty ? "an unknown game" : titleID)
+                let found =
+                    title.isEmpty
+                    ? (titleID.isEmpty ? "an unknown game" : titleID)
                     : "\(title) (\(titleID.isEmpty ? "no title ID" : titleID))"
                 problems.append(
                     "This dump is \(found). The port runs only EA SPORTS FC 26 with title ID "
                         + "\(profile.titleID).")
             } else if appVersion != profile.appVersion {
                 problems.append(
-                    versionProblem(found: appVersion, expected: profile.appVersion, titleID: titleID))
+                    versionProblem(
+                        found: appVersion, expected: profile.appVersion, titleID: titleID))
             } else {
                 problems += fileProblems(base: base, update: update, profile: profile)
             }
@@ -191,14 +202,17 @@ enum GameDumpInspector {
 
     private static func versionProblem(found: String, expected: String, titleID: String) -> String {
         guard !found.isEmpty else {
-            return "sce_sys/param.sfo has no app version. The dump may be damaged; dump the game again."
+            return
+                "sce_sys/param.sfo has no app version. The dump may be damaged; dump the game again."
         }
         if found.compare(expected, options: .numeric) == .orderedAscending {
-            return "This dump is version \(found). The port needs version \(expected): install update "
+            return
+                "This dump is version \(found). The port needs version \(expected): install update "
                 + "\(expected) on your PS4 and dump the game again with the update included, or put "
                 + "the update dump next to the game folder as \(titleID)-UPDATE."
         }
-        return "This dump is version \(found), which is newer than \(expected). The port has only been "
+        return
+            "This dump is version \(found), which is newer than \(expected). The port has only been "
             + "validated with version \(expected) and does not start other versions."
     }
 
@@ -241,7 +255,8 @@ enum GameDumpInspector {
             }
         }
         if !containsGame(chosen), let child = childGameFolder(in: chosen, titleID: titleID) {
-            notes.append("Using the game folder \(child.lastPathComponent) inside the folder you chose.")
+            notes.append(
+                "Using the game folder \(child.lastPathComponent) inside the folder you chose.")
             return child
         }
         return chosen
@@ -254,8 +269,10 @@ enum GameDumpInspector {
     }
 
     private static func childGameFolder(in folder: URL, titleID: String) -> URL? {
-        let children = (try? FileManager.default.contentsOfDirectory(
-            at: folder, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]))
+        let children =
+            (try? FileManager.default.contentsOfDirectory(
+                at: folder, includingPropertiesForKeys: [.isDirectoryKey],
+                options: [.skipsHiddenFiles]))
             ?? []
         let games = children.filter { child in
             isDirectory(child) && containsGame(child)
@@ -284,7 +301,8 @@ enum GameDumpInspector {
             return true
         }
         guard let underlying = error.userInfo[NSUnderlyingErrorKey] as? NSError else {
-            return error.domain == NSPOSIXErrorDomain && [Int(EPERM), Int(EACCES)].contains(error.code)
+            return error.domain == NSPOSIXErrorDomain
+                && [Int(EPERM), Int(EACCES)].contains(error.code)
         }
         return isPermissionError(underlying)
     }
@@ -345,6 +363,7 @@ enum FileDigest {
         defer { try? handle.close() }
         var hasher = SHA256()
         while let chunk = try handle.read(upToCount: 8 << 20), !chunk.isEmpty {
+            try Task.checkCancellation()
             hasher.update(data: chunk)
             onRead(Int64(chunk.count))
         }

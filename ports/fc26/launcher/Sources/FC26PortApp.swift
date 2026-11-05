@@ -4,12 +4,14 @@ import SwiftUI
 final class LauncherAppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         MainActor.assumeIsolated {
-            LauncherModel.shared.shouldTerminate() ? .terminateNow : .terminateCancel
+            LauncherModel.shared.terminationReply()
         }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        true
+        MainActor.assumeIsolated {
+            !LauncherModel.shared.isRunning
+        }
     }
 }
 

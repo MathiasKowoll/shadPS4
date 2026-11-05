@@ -25,7 +25,8 @@ struct LauncherView: View {
 
     private var rosettaSection: some View {
         Section {
-            StatusLine(.error, "Rosetta 2 is not installed. The PS4 game code runs through Rosetta.")
+            StatusLine(
+                .error, "Rosetta 2 is not installed. The PS4 game code runs through Rosetta.")
             Text("Open Terminal, run the command below, then check again.")
                 .foregroundStyle(.secondary)
             Text(HostCheck.rosettaCommand)
@@ -220,6 +221,9 @@ struct LauncherView: View {
         case .valid(let summary), .restored(let summary):
             "\(summary.shaders) shaders, \(summary.pipelines) pipelines ("
                 + ByteCountFormatter.string(fromByteCount: summary.bytes, countStyle: .file) + ")"
+        case .unchecked(let bytes):
+            ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+                + " (could not be checked)"
         case .damaged:
             "Damaged; the last saved copy is restored when you press Play"
         case .discarded:
@@ -259,10 +263,14 @@ struct LauncherView: View {
             Label("Preparing the shader cache and settings…", systemImage: "hourglass")
         case .running(let since):
             Label {
-                Text("Playing since \(since.formatted(date: .omitted, time: .shortened)). Quit the game with ⌘Q in its window.")
+                Text(
+                    "Playing since \(since.formatted(date: .omitted, time: .shortened)). Quit the "
+                        + "game with ⌘Q in its window.")
             } icon: {
                 Image(systemName: "gamecontroller.fill")
             }
+        case .finishing:
+            Label("Saving the shader cache…", systemImage: "hourglass")
         case .idle:
             if let problem = model.blockingProblem {
                 StatusLine(.warning, problem).lineLimit(2)
@@ -283,7 +291,8 @@ struct LauncherView: View {
                 HStack {
                     StatusLine(
                         .error,
-                        "The game stopped unexpectedly after \(duration) (exit code \(run.status)).")
+                        "The game stopped unexpectedly after \(duration) (exit code \(run.status))."
+                    )
                     Button("Show Log") { model.showLogs() }
                 }
             } else if run.stoppedByUser {
@@ -309,8 +318,9 @@ struct LauncherView: View {
             set: { value in model.updateEngineSettings { $0[keyPath: keyPath] = value } })
     }
 
-    private func launcherBinding(_ keyPath: WritableKeyPath<LauncherSettings, Bool>) -> Binding<Bool>
-    {
+    private func launcherBinding(_ keyPath: WritableKeyPath<LauncherSettings, Bool>) -> Binding<
+        Bool
+    > {
         Binding(
             get: { model.launcherSettings[keyPath: keyPath] },
             set: { value in model.updateLauncherSettings { $0[keyPath: keyPath] = value } })

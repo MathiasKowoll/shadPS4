@@ -31,7 +31,8 @@ struct EngineBundle {
 
     static var embedded: EngineBundle {
         EngineBundle(
-            directory: Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS", isDirectory: true))
+            directory: Bundle.main.bundleURL.appendingPathComponent(
+                "Contents/MacOS", isDirectory: true))
     }
 
     var executable: URL { directory.appendingPathComponent("shadps4") }
@@ -48,7 +49,8 @@ enum HostCheck {
     static let rosettaCommand = "softwareupdate --install-rosetta --agree-to-license"
 
     static func rosettaInstalled() -> Bool {
-        run("/usr/bin/arch", ["-x86_64", "/usr/bin/true"]).status == 0
+        FileManager.default.fileExists(atPath: "/Library/Apple/usr/libexec/oah/libRosettaRuntime")
+            || run("/usr/bin/arch", ["-x86_64", "/usr/bin/true"]).status == 0
     }
 
     static func runningEngines() -> [Int32] {
@@ -57,8 +59,9 @@ enum HostCheck {
             .compactMap { Int32($0) }
     }
 
-    private static func run(_ tool: String, _ arguments: [String]) -> (status: Int32, output: String)
-    {
+    private static func run(_ tool: String, _ arguments: [String]) -> (
+        status: Int32, output: String
+    ) {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: tool)
         process.arguments = arguments
@@ -102,7 +105,9 @@ struct EngineRun {
             ?? engine.directory.path
         environment["SHADPS4_FRAME_METRICS_PATH"] = data.metricsFile.path
         environment["SHADPS4_VIDEOOUT_FLIP_RATE_OVERRIDE"] = "0"
-        for key in ["SHADPS4_DEFER_UPLOADS", "SHADPS4_ASYNC_IMAGE_READBACK", "SHADPS4_FAULT_EXPAND"]
+        for key in [
+            "SHADPS4_DEFER_UPLOADS", "SHADPS4_ASYNC_IMAGE_READBACK", "SHADPS4_FAULT_EXPAND",
+        ]
         where environment[key] == nil {
             environment[key] = "1"
         }
@@ -124,7 +129,8 @@ struct EngineRun {
         Self.rotate(data.consoleLog, to: data.previousConsoleLog)
         Self.rotate(data.metricsFile, to: data.metrics.appendingPathComponent("previous-run.csv"))
         guard manager.createFile(atPath: data.consoleLog.path, contents: Data(header.utf8)) else {
-            throw CocoaError(.fileWriteUnknown, userInfo: [NSFilePathErrorKey: data.consoleLog.path])
+            throw CocoaError(
+                .fileWriteUnknown, userInfo: [NSFilePathErrorKey: data.consoleLog.path])
         }
         let log = try FileHandle(forWritingTo: data.consoleLog)
         try log.seekToEnd()

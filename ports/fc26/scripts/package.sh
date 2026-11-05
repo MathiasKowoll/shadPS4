@@ -44,21 +44,26 @@ if [[ $(plutil -extract ICD.library_path raw "$build_dir/$icd_name") != ./libvul
     exit 1
 fi
 
-minimum_macos=$(otool -l "$build_dir/shadps4" |
-    awk '$1 == "cmd" && $2 == "LC_BUILD_VERSION" { found = 1 } found && $1 == "minos" { print $2; exit }')
+minimum_macos=$(otool -l "$build_dir/shadps4" | awk '
+    $1 == "cmd" && $2 == "LC_BUILD_VERSION" { found = 1 }
+    found && $1 == "minos" { print $2; exit }')
 if [[ -z $minimum_macos ]]; then
     echo "STOP: cannot read the minimum macOS version of $build_dir/shadps4" >&2
     exit 1
 fi
 
+source_dir=
+if [[ -f $build_dir/CMakeCache.txt ]]; then
+    source_dir=$(sed -n 's/^CMAKE_HOME_DIRECTORY:INTERNAL=//p' "$build_dir/CMakeCache.txt")
+fi
 build_info=$build_dir/fc26-build-info.json
-if [[ -f $build_info ]]; then
+if [[ -f $build_info && ! $build_dir/shadps4 -nt $build_info ]]; then
     engine_revision=$(plutil -extract engine_revision raw "$build_info")
     kosmickrisp_revision=$(plutil -extract kosmickrisp_revision raw "$build_info")
 else
-    source_dir=$(sed -n 's/^CMAKE_HOME_DIRECTORY:INTERNAL=//p' "$build_dir/CMakeCache.txt")
     if [[ -z $source_dir ]] || ! git -C "$source_dir" rev-parse HEAD >/dev/null 2>&1; then
         echo "STOP: cannot identify the engine source of $build_dir" >&2
+        echo "Build the engine with: ports/fc26/scripts/build.sh" >&2
         exit 1
     fi
     engine_revision=$(git -C "$source_dir" rev-parse --short=12 HEAD)
@@ -66,11 +71,16 @@ else
         engine_revision+=-dirty
     fi
     kosmickrisp_revision=$(git -C "$source_dir/externals/mesa-kosmickrisp" rev-parse --short=12 HEAD)
-    echo "WARNING: $build_info is missing; the revision is the source checkout's current state," >&2
-    echo "which can differ from the state the engine was built from: $engine_revision" >&2
+    if [[ -f $build_info ]]; then
+        echo "WARNING: shadps4 is newer than $build_info (rebuilt outside build.sh)." >&2
+    else
+        echo "WARNING: $build_info is missing." >&2
+    fi
+    echo "The revision is the source checkout's current state, which can differ from the state" >&2
+    echo "the engine was built from: $engine_revision" >&2
 fi
-license_source=$(sed -n 's/^CMAKE_HOME_DIRECTORY:INTERNAL=//p' "$build_dir/CMakeCache.txt")
-if [[ ! -d $license_source/externals ]]; then
+license_source=$source_dir
+if [[ -z $license_source || ! -d $license_source/externals ]]; then
     license_source=$repo_dir
 fi
 
@@ -133,6 +143,21 @@ while IFS= read -r license; do
 done < <(find "$license_source/externals" -maxdepth 4 -type f \
     \( -iname 'LICENSE*' -o -iname 'COPYING*' -o -iname 'NOTICE*' \) -not -path '*/.git/*' |
     sort)
+mesa_dir=$license_source/externals/mesa-kosmickrisp/externals/mesa
+if [[ -f $mesa_dir/docs/license.rst ]]; then
+    cp "$mesa_dir/docs/license.rst" "$contents/Resources/licenses/mesa-license.rst"
+fi
+for license in "$mesa_dir"/licenses/*; do
+    if [[ -f $license ]]; then
+        cp "$license" "$contents/Resources/licenses/mesa-licenses-${license##*/}"
+    fi
+done
+if [[ ! -f $contents/Resources/licenses/vulkan-loader-LICENSE.txt ||
+    ! -f $contents/Resources/licenses/mesa-license.rst ]]; then
+    echo "STOP: third-party licenses are missing under $license_source/externals" >&2
+    echo "Initialize the engine source's submodules: git submodule update --init --recursive" >&2
+    exit 1
+fi
 cat >"$contents/Resources/licenses/README.txt" <<EOF
 This application contains shadPS4, the Khronos Vulkan loader and the Mesa KosmicKrisp Vulkan
 driver, built from the EA SPORTS FC 26 port of shadPS4 (https://github.com/MathiasKowoll/shadPS4)
@@ -163,8 +188,8 @@ done < <(find "$app" -type f -print0)
 if ((personal_paths > 0)); then
     if [[ $allow_build_paths != 1 ]]; then
         echo "STOP: the package embeds $personal_paths build-machine paths (source paths in" >&2
-        echo "assertion messages). Rebuild the engine with path remapping before distributing, or" >&2
-        echo "set FC26_PACKAGE_ALLOW_BUILD_PATHS=1 for a local test package." >&2
+        echo "assertion messages). Rebuild the engine with path remapping before distributing," >&2
+        echo "or set FC26_PACKAGE_ALLOW_BUILD_PATHS=1 for a local test package." >&2
         exit 1
     fi
     echo "WARNING: local test package: it embeds $personal_paths build-machine paths" >&2
@@ -185,13 +210,14 @@ else
     done
     codesign --force --timestamp --options runtime --sign "$sign_identity" \
         --entitlements "$launcher_dir/engine.entitlements" "$contents/MacOS/shadps4"
-    codesign --force --timestamp --options runtime --sign "$sign_identity" "$app"
+    codesign --force --timestamp --options runtime --sign "$sign_identity" \
+        --entitlements "$launcher_dir/launcher.entitlements" "$app"
     signing=$sign_identity
 fi
 codesign --verify --deep --strict "$app"
 
 archive=$staging/$package_name/$package_name.zip
-ditto -c -k --sequesterRsrc --keepParent "$app" "$archive"
+ditto -c -k --norsrc --noextattr --noacl --keepParent "$app" "$archive"
 (cd "$staging/$package_name" && shasum -a 256 "$package_name.zip" >"$package_name.zip.sha256")
 mv "$staging/$package_name" "$destination"
 

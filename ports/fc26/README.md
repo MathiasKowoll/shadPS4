@@ -179,7 +179,9 @@ older builds the script reports the source checkout's current revision instead.
 
 Variables:
 
-- `FC26_BUILD_DIR`: engine build directory with `shadps4`, both dylibs and the ICD.
+- `FC26_BUILD_DIR`: engine build directory with `shadps4`, both dylibs, the ICD, and either the
+  `fc26-build-info.json` written by `build.sh` or a `CMakeCache.txt` naming the source checkout,
+  whose initialized submodules provide the third-party licenses.
 - `FC26_PACKAGE_DIR`: output directory; defaults to
   `/Volumes/CrucialX8/Emulation/Ps4/FC26/port-package`.
 - `FC26_SIGN_IDENTITY`: `-` (the default) signs ad hoc; see signing below.
@@ -192,17 +194,19 @@ Variables:
    every profiled file against `profile.json`. It accepts a merged dump or a base dump with the
    update next to it as `CUSA52342-UPDATE` or `CUSA52342-patch`, the layout the engine overlays.
    Errors name the problem: another game, an older or newer version, a missing or truncated file.
+   A `CUSA52342-mods` folder is reported, because the engine loads it over the game unchecked.
    SHA-256 verification runs in the background and is remembered while the files are unchanged; a
    mismatch is a warning, because a dumper can write the same content differently.
 2. Player data: one folder per player, by default
    `~/Library/Application Support/FC26 Port/Players/<name>`, or any folder the player chooses. It
    holds the engine's portable `user/` directory (settings, saves, system modules, shader cache),
    `logs/`, `metrics/`, `shader-cache/` and `launcher.json`. The first use seeds
-   `user/config.json` from `managed.json`. Game and player folders may not contain each other.
+   `user/config.json` from `managed.json`. The folder pickers and Play refuse game and player
+   folders that contain each other.
 3. System modules: shows whether `libSceJson.sprx`, `libSceJson2.sprx` and `libSceAudiodec.sprx`
    are in `user/sys_modules/`, explains that they come from the player's own console, and copies
    chosen `.sprx` files there after checking for an ELF or SELF header. Missing modules are a
-   warning, shown once before the first run, as in `run.sh`.
+   warning, as in `run.sh`: the section always shows them, and Play asks once per player.
 4. Settings: fullscreen, frame-rate counter, FSR, RCAS (only with FSR), the Metal HUD and a
    detailed log, all off except the frame-rate counter. Engine settings live in the player's
    `user/config.json`; the Metal HUD and log choices in `launcher.json`.
@@ -214,8 +218,8 @@ Variables:
    shader cache explains that early runs stutter while shaders compile.
 6. Shader cache: before and after every run the launcher tests `user/cache/CUSA52342.zip`. A
    valid archive is copied to `shader-cache/backup.zip`; an archive left incomplete by a crash is
-   preserved under `shader-cache/partial/` and replaced by that backup, or by the latest
-   `run.sh` snapshot in a development data folder.
+   kept as `shader-cache/damaged.zip` and replaced by that backup, or by the latest `run.sh`
+   snapshot in a development data folder. Quitting the launcher waits for the check after a run.
 7. Logs: each run writes `logs/last-run.console.log` with a header naming the engine revision,
    game, player folder and settings, and keeps the previous run next to it. The detailed log goes
    to `user/log/`. The launcher shows both, and the exit code after an unexpected stop.
@@ -238,10 +242,13 @@ is a new identity for these privacy settings, so macOS asks again after every re
 
 To avoid both, sign with a Developer ID and notarize. `FC26_SIGN_IDENTITY="Developer ID
 Application: <name> (<team>)"` signs every binary with the hardened runtime and gives the engine
-`launcher/engine.entitlements`: `allow-dyld-environment-variables` because the launcher passes
-`DYLD_LIBRARY_PATH`, `allow-unsigned-executable-memory` for the guest code the engine maps,
-`disable-library-validation`, and `audio-input`. This path has not been validated with the engine
-yet; test a signed package through a full boot before notarizing it with
+`launcher/engine.entitlements`: `allow-unsigned-executable-memory` for the guest code the engine
+maps, `disable-library-validation`, and `audio-input`. The launcher gets
+`launcher/launcher.entitlements` with `audio-input`, because macOS attributes the engine's
+microphone use to the app that started it. The hardened runtime ignores the
+`DYLD_LIBRARY_PATH` the launcher passes, which is harmless: the engine finds `libvulkan.dylib`
+through its `@executable_path` rpath. This path has not been validated with the engine yet; test
+a signed package through a full boot before notarizing it with
 `xcrun notarytool submit <zip> --keychain-profile <profile> --wait`, then
 `xcrun stapler staple` the application and archive it again.
 

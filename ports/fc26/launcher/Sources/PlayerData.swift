@@ -163,7 +163,8 @@ struct PlayerData {
         var config = try loadEngineConfig()
         merge(&config, "GPU", ["vblank_frequency": 60])
         if diagnosticLog {
-            merge(&config, "Log", ["enable": true, "filter": Self.diagnosticLogFilter, "sync": false])
+            merge(
+                &config, "Log", ["enable": true, "filter": Self.diagnosticLogFilter, "sync": false])
         } else {
             merge(&config, "Log", ["enable": false, "sync": false])
         }
@@ -176,8 +177,9 @@ struct PlayerData {
         if manager.fileExists(atPath: engineConfig.path) {
             let stamp = ISO8601DateFormatter.string(
                 from: Date(), timeZone: .current,
-                formatOptions: [.withFullDate, .withTime, .withColonSeparatorInTime])
-                .replacingOccurrences(of: ":", with: "")
+                formatOptions: [.withFullDate, .withTime, .withColonSeparatorInTime]
+            )
+            .replacingOccurrences(of: ":", with: "")
             let destination = engineConfig.deletingLastPathComponent()
                 .appendingPathComponent("config.json.replaced-\(stamp).json")
             try manager.moveItem(at: engineConfig, to: destination)
@@ -202,11 +204,13 @@ struct PlayerData {
         var installed: [String] = []
         for source in sources {
             let destination = systemModules.appendingPathComponent(source.lastPathComponent)
-            let staging = systemModules.appendingPathComponent(".\(source.lastPathComponent).partial")
+            let staging = systemModules.appendingPathComponent(
+                ".\(source.lastPathComponent).partial")
             try? manager.removeItem(at: staging)
             try manager.copyItem(at: source, to: staging)
             guard rename(staging.path, destination.path) == 0 else {
-                throw CocoaError(.fileWriteUnknown, userInfo: [NSFilePathErrorKey: destination.path])
+                throw CocoaError(
+                    .fileWriteUnknown, userInfo: [NSFilePathErrorKey: destination.path])
             }
             installed.append(source.lastPathComponent)
         }
@@ -241,17 +245,27 @@ struct PlayerData {
     }
 }
 
+enum PlayerLock {
+    case acquired(PlayerDataLock?)
+    case inUse
+}
+
 final class PlayerDataLock {
     private let descriptor: Int32
 
-    init?(_ data: PlayerData) {
-        let descriptor = open(data.lockFile.path, O_CREAT | O_RDWR | O_CLOEXEC, 0o644)
-        guard descriptor >= 0 else { return nil }
-        guard flock(descriptor, LOCK_EX | LOCK_NB) == 0 else {
-            close(descriptor)
-            return nil
-        }
+    private init(descriptor: Int32) {
         self.descriptor = descriptor
+    }
+
+    static func acquire(_ data: PlayerData) -> PlayerLock {
+        let descriptor = open(data.lockFile.path, O_CREAT | O_RDWR | O_CLOEXEC, 0o644)
+        guard descriptor >= 0 else { return .acquired(nil) }
+        guard flock(descriptor, LOCK_EX | LOCK_NB) == 0 else {
+            let failure = errno
+            close(descriptor)
+            return failure == EWOULDBLOCK ? .inUse : .acquired(nil)
+        }
+        return .acquired(PlayerDataLock(descriptor: descriptor))
     }
 
     deinit {

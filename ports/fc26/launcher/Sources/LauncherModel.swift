@@ -15,6 +15,7 @@ enum RunState: Equatable {
     case idle
     case preparing
     case running(since: Date)
+    case finishing
 }
 
 struct LastRun: Equatable {
@@ -65,9 +66,11 @@ final class LauncherModel {
     private var gameGeneration = 0
     private var playerGeneration = 0
     private var hashGeneration = 0
+    private var hashTask: Task<Void, Never>?
     private var process: Process?
     private var lock: PlayerDataLock?
     private var stopRequested = false
+    private var pendingTermination = false
 
     private init() {
         var damage: [String] = []
@@ -83,7 +86,8 @@ final class LauncherModel {
             damage.append("managed.json")
         }
         damage += engine.missingFiles()
-        launcherDamage = damage.isEmpty
+        launcherDamage =
+            damage.isEmpty
             ? nil
             : "The launcher is incomplete (\(damage.joined(separator: ", ")) missing from the app). "
                 + "Download or build the launcher again."
@@ -93,9 +97,11 @@ final class LauncherModel {
             .map { URL(fileURLWithPath: $0, isDirectory: true) }
         let gamePath = defaults.string(forKey: Keys.gameFolder)
             .map { URL(fileURLWithPath: $0, isDirectory: true) }
-        let playerPath = defaults.string(forKey: Keys.playerFolder)
+        let playerPath =
+            defaults.string(forKey: Keys.playerFolder)
             .map { URL(fileURLWithPath: $0, isDirectory: true) }
-            ?? PlayerData.defaultPlayersFolder().appendingPathComponent("Default", isDirectory: true)
+            ?? PlayerData.defaultPlayersFolder().appendingPathComponent(
+                "Default", isDirectory: true)
         Task { @MainActor in
             if let gamePath {
                 LauncherModel.shared.inspectGame(gamePath)
@@ -117,16 +123,20 @@ final class LauncherModel {
         if !rosettaInstalled {
             return "Rosetta 2 is not installed. The PS4 game code needs it on Apple silicon."
         }
+        if isCheckingGame {
+            return "Checking the game folder…"
+        }
         guard let gameDump else {
-            return isCheckingGame
-                ? "Checking the game folder…" : "Choose the folder of your EA SPORTS FC 26 dump."
+            return "Choose the folder of your EA SPORTS FC 26 dump."
         }
         if let problem = gameDump.problems.first {
             return problem
         }
+        if isCheckingPlayer {
+            return "Opening the player data…"
+        }
         guard player != nil, playerError == nil else {
-            return playerError
-                ?? (isCheckingPlayer ? "Opening the player data…" : "Choose a player data folder.")
+            return playerError ?? "Choose a player data folder."
         }
         return nil
     }
@@ -164,6 +174,8 @@ final class LauncherModel {
         hashGeneration += 1
         let generation = gameGeneration
         gameFolder = url.standardizedFileURL
+        gameDump = nil
+        hashTask?.cancel()
         hashState = .idle
         isCheckingGame = true
         Task.detached(priority: .userInitiated) {
@@ -171,7 +183,8 @@ final class LauncherModel {
             let fingerprint =
                 dump.isPlayable ? GameHashVerifier.fingerprint(dump, profile: profile) : nil
             await MainActor.run {
-                LauncherModel.shared.applyGame(dump, fingerprint: fingerprint, generation: generation)
+                LauncherModel.shared.applyGame(
+                    dump, fingerprint: fingerprint, generation: generation)
             }
         }
     }
@@ -189,11 +202,12 @@ final class LauncherModel {
     }
 
     func verifyGameFiles() {
-        guard let profile, let dump = gameDump, dump.isPlayable else { return }
+        guard let profile, let dump = gameDump, dump.isPlayable, !isRunning else { return }
+        hashTask?.cancel()
         hashGeneration += 1
         let generation = hashGeneration
         hashState = .running(0)
-        Task.detached(priority: .utility) {
+        hashTask = Task.detached(priority: .utility) {
             let fingerprint = GameHashVerifier.fingerprint(dump, profile: profile)
             var lastReported = 0.0
             do {
@@ -208,6 +222,10 @@ final class LauncherModel {
                 await MainActor.run {
                     LauncherModel.shared.finishHash(
                         mismatched, fingerprint: fingerprint, generation: generation)
+                }
+            } catch is CancellationError {
+                await MainActor.run {
+                    LauncherModel.shared.failHash(nil, generation: generation)
                 }
             } catch {
                 let reason = error.localizedDescription
@@ -234,9 +252,9 @@ final class LauncherModel {
         }
     }
 
-    private func failHash(_ reason: String, generation: Int) {
+    private func failHash(_ reason: String?, generation: Int) {
         guard generation == hashGeneration else { return }
-        hashState = .failed(reason)
+        hashState = reason.map(HashState.failed) ?? .idle
     }
 
     func selectPlayer(_ url: URL) {
@@ -437,7 +455,9 @@ final class LauncherModel {
     func showLogs() {
         guard let player else { return }
         let manager = FileManager.default
-        let items = [player.consoleLog, player.engineLogs].filter { manager.fileExists(atPath: $0.path) }
+        let items = [player.consoleLog, player.engineLogs].filter {
+            manager.fileExists(atPath: $0.path)
+        }
         NSWorkspace.shared.activateFileViewerSelecting(items.isEmpty ? [player.logs] : items)
     }
 
@@ -458,8 +478,12 @@ final class LauncherModel {
         }
         guard let profile, let seedConfig, let game = gameDump, let player else { return }
         runState = .preparing
+        let gameGeneration = gameGeneration
+        let playerGeneration = playerGeneration
         Task.detached(priority: .userInitiated) {
             let check = PlayCheck(
+                gameGeneration: gameGeneration,
+                playerGeneration: playerGeneration,
                 rosettaInstalled: HostCheck.rosettaInstalled(),
                 game: GameDumpInspector.inspect(game.chosenFolder, profile: profile),
                 player: PlayerSnapshot(player, seedConfig: seedConfig, inspectCache: false),
@@ -472,6 +496,11 @@ final class LauncherModel {
 
     private func continuePlay(_ check: PlayCheck) {
         runState = .idle
+        guard check.gameGeneration == gameGeneration, check.playerGeneration == playerGeneration,
+            !pendingTermination
+        else {
+            return
+        }
         rosettaInstalled = check.rosettaInstalled
         if let current = gameDump,
             check.game.problems != current.problems || check.game.baseFolder != current.baseFolder
@@ -496,15 +525,24 @@ final class LauncherModel {
             return
         }
         guard let game = gameDump, let player else { return }
+        let gameFolders = [game.baseFolder, game.updateFolder].compactMap { $0 }
+        if gameFolders.contains(where: { isInside(player.root, $0) || isInside($0, player.root) }) {
+            showError(
+                "Game and player data must be separate",
+                "The game folder and the player data folder cannot contain each other. Choose "
+                    + "another player folder.")
+            return
+        }
         if !check.runningEngines.isEmpty {
             showError(
                 "The game engine is already running",
                 "Another shadPS4 game is running (process "
                     + check.runningEngines.map(String.init).joined(separator: ", ")
-                    + "). Quit it first; if it does not respond, force quit it in Activity Monitor.")
+                    + "). Quit it first; if it does not respond, force quit it in Activity Monitor."
+            )
             return
         }
-        guard let lock = PlayerDataLock(player) else {
+        guard case .acquired(let lock) = PlayerDataLock.acquire(player) else {
             showError(
                 "This player is already playing",
                 "Another launcher is using \(EngineRun.display(player.root)). Close it, or choose "
@@ -515,8 +553,12 @@ final class LauncherModel {
         start(game, player, lock: lock)
     }
 
-    private func start(_ game: GameDump, _ player: PlayerData, lock: PlayerDataLock) {
+    private func start(_ game: GameDump, _ player: PlayerData, lock: PlayerDataLock?) {
         self.lock = lock
+        hashTask?.cancel()
+        if case .running = hashState {
+            hashState = .idle
+        }
         runState = .preparing
         stopRequested = false
         let settings = engineSettings
@@ -628,12 +670,14 @@ final class LauncherModel {
     ) {
         let stoppedByUser = stopRequested
         let crashed = reason == .uncaughtSignal || status != 0
+        let ended = Date()
         process = nil
+        runState = .finishing
         let revision = buildInfo?.engineRevision ?? "unknown"
         Task.detached(priority: .userInitiated) {
             let cache = ShaderCacheGuard.protect(player, engineRevision: revision)
             let run = LastRun(
-                endedAt: Date(), duration: Date().timeIntervalSince(started), status: status,
+                endedAt: ended, duration: ended.timeIntervalSince(started), status: status,
                 crashed: crashed && !stoppedByUser, stoppedByUser: stoppedByUser,
                 cacheNote: LauncherModel.cacheNote(cache))
             await MainActor.run {
@@ -650,7 +694,13 @@ final class LauncherModel {
         if let settings = try? player?.readEngineSettings() {
             engineSettings = settings
         }
-        NSApp.activate()
+        if pendingTermination {
+            NSApp.reply(toApplicationShouldTerminate: true)
+        } else if NSApp.windows.contains(where: { $0.isVisible && $0.canBecomeMain }) {
+            NSApp.activate()
+        } else {
+            NSApp.terminate(nil)
+        }
     }
 
     nonisolated private static func cacheNote(_ state: ShaderCacheState) -> String? {
@@ -681,34 +731,35 @@ final class LauncherModel {
         stopRequested = true
         process.terminate()
         let pid = process.processIdentifier
-        DispatchQueue.global().asyncAfter(deadline: .now() + 5) {
+        DispatchQueue.global().asyncAfter(deadline: .now() + 20) {
             if process.isRunning {
                 kill(pid, SIGKILL)
             }
         }
     }
 
-    func shouldTerminate() -> Bool {
-        guard let process, process.isRunning else { return true }
-        guard
-            confirm(
-                "The game is still running",
-                "Quit the game from its window with ⌘Q first. Stopping it from here loses "
-                    + "progress since your last save.",
-                action: "Stop Game and Quit")
-        else {
-            return false
+    func terminationReply() -> NSApplication.TerminateReply {
+        switch runState {
+        case .idle, .preparing:
+            return .terminateNow
+        case .finishing:
+            pendingTermination = true
+            return .terminateLater
+        case .running:
+            guard let process, process.isRunning else { return .terminateNow }
+            guard
+                confirm(
+                    "The game is still running",
+                    "Quit the game from its window with ⌘Q first. Stopping it from here loses "
+                        + "progress since your last save.",
+                    action: "Stop Game and Quit")
+            else {
+                return .terminateCancel
+            }
+            pendingTermination = true
+            stop(process)
+            return .terminateLater
         }
-        stopRequested = true
-        process.terminate()
-        let deadline = Date().addingTimeInterval(5)
-        while process.isRunning, Date() < deadline {
-            RunLoop.current.run(until: Date().addingTimeInterval(0.1))
-        }
-        if process.isRunning {
-            kill(process.processIdentifier, SIGKILL)
-        }
-        return true
     }
 
     private func rememberPlayer(_ root: URL) {
@@ -783,6 +834,8 @@ private struct PlayerSnapshot {
 }
 
 private struct PlayCheck {
+    let gameGeneration: Int
+    let playerGeneration: Int
     let rosettaInstalled: Bool
     let game: GameDump
     let player: PlayerSnapshot
