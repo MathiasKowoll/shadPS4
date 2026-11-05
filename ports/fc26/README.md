@@ -67,6 +67,9 @@ Variables:
   default) keeps it disabled for uncontaminated frame-time measurements.
 - `FC26_METALFX`: `preserve` (the default) keeps the saved preference, `1` enables the MetalFX
   spatial upscaler for the presented image, and `0` disables it. See "MetalFX upscaling" below.
+- `FC26_PS4_PRO`: `preserve` (the default) keeps the saved preference, `1` reports a PS4 Pro to the
+  game (`General.neo_mode`), which FC26 declares support for, and `0` reports a base PS4. The
+  validated baseline is the base PS4.
 - `FC26_VBLANK_FREQUENCY`: host vblank rate from 30 to 240 Hz; defaults to the PS4 baseline of 60.
 - `FC26_FLIP_RATE_OVERRIDE`: defaults to `0` for the 60 FPS port; use `auto` to honor the game's
   requested 30 FPS presentation divisor.
