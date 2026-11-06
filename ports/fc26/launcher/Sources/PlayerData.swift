@@ -28,7 +28,7 @@ struct EngineSettings: Equatable {
 struct LauncherSettings: Codable, Equatable {
     var metalHUD = false
     var diagnosticLog = false
-    var menusAt60 = false
+    var menusAt60 = true
     var shaderNoticeShown = false
     var modulesNoticeShown = false
 
@@ -38,7 +38,7 @@ struct LauncherSettings: Codable, Equatable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         metalHUD = try container.decodeIfPresent(Bool.self, forKey: .metalHUD) ?? false
         diagnosticLog = try container.decodeIfPresent(Bool.self, forKey: .diagnosticLog) ?? false
-        menusAt60 = try container.decodeIfPresent(Bool.self, forKey: .menusAt60) ?? false
+        menusAt60 = try container.decodeIfPresent(Bool.self, forKey: .menusAt60) ?? true
         shaderNoticeShown =
             try container.decodeIfPresent(Bool.self, forKey: .shaderNoticeShown) ?? false
         modulesNoticeShown =
