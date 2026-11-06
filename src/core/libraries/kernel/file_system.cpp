@@ -687,6 +687,32 @@ void TraceRead(ReadTrace* trace, const Core::FileSys::File* file, s64 offset, u6
     std::fflush(trace->out);
 }
 
+// Diagnostic: SHADPS4_READ_LATENCY_US and SHADPS4_READ_US_PER_MB delay every read of a game file
+// (/app0) on the reading thread, to reproduce loads from a cold file cache or slow storage.
+void SimulateSlowStorage(const Core::FileSys::File* file, s64 bytes) {
+    static const std::pair<u64, u64> config = [] {
+        const auto read = [](const char* name) -> u64 {
+            const char* value = std::getenv(name);
+            return value != nullptr ? std::strtoull(value, nullptr, 10) : 0;
+        };
+        const u64 latency = read("SHADPS4_READ_LATENCY_US");
+        const u64 per_mb = read("SHADPS4_READ_US_PER_MB");
+        if (latency != 0 || per_mb != 0) {
+            LOG_WARNING(Kernel_Fs, "slow storage simulation: {} us per read, {} us per MB",
+                        latency, per_mb);
+        }
+        return std::pair{latency, per_mb};
+    }();
+    if ((config.first == 0 && config.second == 0) || bytes <= 0 ||
+        !file->m_guest_name.starts_with("/app0/")) {
+        return;
+    }
+    const u64 delay = config.first + config.second * static_cast<u64>(bytes) / (1024 * 1024);
+    if (delay != 0) {
+        std::this_thread::sleep_for(std::chrono::microseconds(delay));
+    }
+}
+
 } // namespace
 
 s64 ReadFile(Core::FileSys::File* file, void* buf, u64 nbytes) {
@@ -707,6 +733,7 @@ s64 ReadFile(Core::FileSys::File* file, void* buf, u64 nbytes) {
     if (trace != nullptr) {
         TraceRead(trace, file, offset, nbytes, bytes);
     }
+    SimulateSlowStorage(file, bytes);
     if (bytes < 0) {
         return bytes;
     }
