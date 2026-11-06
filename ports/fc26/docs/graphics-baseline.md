@@ -104,18 +104,24 @@ Defaults that define the base:
 Known issues in the base, to be fixed one at a time and validated against these scenes before
 they join it:
 
-1. The home goalkeeper wears the outfield kit in most runs: the game never samples his kit texture,
-   so it chooses the outfield kit while the match loads. Measured on 2026-11-05: honouring the
-   game's flip rate (menus at 30, `080e5cbf`) did not help (four traced base runs, two of them at
-   30, all wrong) and was reverted. Runs got it right when the load was slower (a cold shader cache,
-   or diagnostic builds that hash every large texture upload). In every traced wrong run the game
-   opened `installpackage_02/cas_02.cas` only after the loading screen had started (it asks for
-   60 FPS there), with about two seconds left before the intro. Pacing that screen, a cold cache,
-   and reading back every linear image did not help either.
-   Workaround seen once, to confirm: in Kick Off > Match Preview > Select Kits, change the team's
-   kit and rotate through the kits back to the one you want. The player did this in a fresh player
-   folder with the PSPulse squads, and both goalkeepers wore their own kits; selecting the kits
-   probably makes the game load every kit, the goalkeepers' included, before the match loads.
+1. The goalkeepers wear an outfield kit when Start Match is pressed too soon after Match Preview
+   opens. Measured on 2026-11-06 with the same scripted navigation:
+   - About 3 s after Match Preview opens (2.9 s with menus at 60 FPS, 3.6 s at the game's 30), the
+     game loads the 3D scene of Select Kits (its lighting, the ball, both outfield kits) and picks
+     the goalkeepers' kits. The log shows no network or file access before it: the delay is the
+     game's own. Match Preview accepts Cross only after about 2 s.
+   - Start Match after that step: the match load reads `goalie_home_2_0` of both teams 0.7 to 0.9 s
+     later and both keepers wear their own kits (six runs, waits from 0.4 s to 60 s after the step).
+   - Start Match before it: the match load reads no keeper kit at all (read trace) and the keepers
+     fall back to an outfield kit, the home keeper to his team's home kit (sixteen runs). The away
+     keeper probably falls back too (the match load reads Liverpool's home kit in both cases; not
+     checked on screen), which would be less visible because it differs from the away kit.
+   On a PS4 a player pressing Start Match within those 3 s takes the same path, so the emulator
+   probably breaks that path somewhere; it is not found yet. Ruled out: the shader cache, the flip
+   rate, load pacing, readbacks, MetalFX, network calls, and the emulator's AIO request ids (a real
+   defect, fixed on branch `fc26-fix-aio`, that does not change this).
+   Player workaround: on Match Preview, wait about 3 seconds before Start Match. The Select Kits
+   rotation recorded earlier worked for the same reason: it keeps the player on Match Preview.
 2. Occasional flashes or artifacts in cinematics; the crowd card display in the first cinematic
    alternates good and broken frames.
 3. Play still drops below 60 in heavier camera angles; the GPU thread (`GpuCommandProcessor`) is
