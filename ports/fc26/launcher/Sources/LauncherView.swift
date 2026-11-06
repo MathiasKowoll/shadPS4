@@ -221,7 +221,10 @@ struct LauncherView: View {
                     + "PS4 and matches at 60. PS4 Pro mode tells the game it runs on a PS4 Pro; it is "
                     + "experimental, and the known issue is a square of noise around the "
                     + "controlled-player marker. The Metal HUD is Apple's performance overlay for "
-                    + "diagnostics. Connect your controller before you press Play.")
+                    + "diagnostics. Connect your controller before you press Play. Seen once, not "
+                    + "confirmed yet: if a goalkeeper wears the outfield kit, open Select Kits in "
+                    + "Match Preview, rotate through the kits and pick yours again before Start "
+                    + "Match.")
         }
         .disabled(model.player == nil || model.configUnreadable)
     }

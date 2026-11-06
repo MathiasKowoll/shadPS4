@@ -256,6 +256,11 @@ time another app came to the front and on again when the game returned, off when
 In a window it stays off. `log stream --predicate 'process == "gamepolicyd"'` shows the
 transitions (`Game mode status is now on`).
 
+Player tip, seen once and not confirmed yet: if a goalkeeper wears the outfield kit, open Select
+Kits in Match Preview, rotate through the kits and pick yours again before Start Match. In the
+user's launcher run on 2026-11-05 both goalkeepers then wore their own kits. The launcher's
+Settings help repeats the tip.
+
 Players need Apple silicon, macOS 26 or later (the engine's deployment target) and Rosetta 2;
 the launcher shows the `softwareupdate --install-rosetta --agree-to-license` command when Rosetta
 is missing. It stores the chosen game folder and recent players in the user defaults of
