@@ -104,10 +104,13 @@ Defaults that define the base:
 Known issues in the base, to be fixed one at a time and validated against these scenes before
 they join it:
 
-1. Fixed on 2026-11-05 (`080e5cbf`): goalkeepers wore the outfield kit in most runs because
-   `run.sh` forced menus to 60 FPS, which halves a frame-counted wait while the goalkeeper kit is
-   prepared. The game's own flip rate is now the default (menus at 30 as on the console, play at
-   60), and the player saw both goalkeepers in their own kits in a full match.
+1. The home goalkeeper wears the outfield kit in most runs: the game never samples his kit texture,
+   so it chooses the outfield kit while the match loads. Measured on 2026-11-05: honouring the
+   game's flip rate (menus at 30, `080e5cbf`) did not help (four traced base runs, two of them at
+   30, all wrong) and was reverted. Runs got it right when the load was slower (a cold shader cache,
+   or diagnostic builds that hash every large texture upload). In every traced wrong run the game
+   opened `installpackage_02/cas_02.cas` only after the loading screen had started (it asks for
+   60 FPS there), with about two seconds left before the intro.
 2. Occasional flashes or artifacts in cinematics; the crowd card display in the first cinematic
    alternates good and broken frames.
 3. Play still drops below 60 in heavier camera angles; the GPU thread (`GpuCommandProcessor`) is
