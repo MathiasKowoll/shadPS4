@@ -40,53 +40,80 @@ enum ParamSFOError: LocalizedError {
 }
 
 enum ParamSFO {
+    struct Entry {
+        let key: String
+        let format: Int
+        let valueStart: Int
+        let length: Int
+    }
+
     static func read(_ url: URL) throws -> [String: String] {
         try parse([UInt8](Data(contentsOf: url)))
     }
 
     static func parse(_ bytes: [UInt8]) throws -> [String: String] {
+        var values: [String: String] = [:]
+        for entry in try entries(bytes) {
+            if entry.format == 0x0404, entry.length >= 4 {
+                values[entry.key] = String(try u32(bytes, entry.valueStart))
+            } else {
+                var valueEnd = entry.valueStart + entry.length
+                while valueEnd > entry.valueStart, bytes[valueEnd - 1] == 0 {
+                    valueEnd -= 1
+                }
+                values[entry.key] = String(
+                    decoding: bytes[entry.valueStart..<valueEnd], as: UTF8.self)
+            }
+        }
+        return values
+    }
+
+    static func zeroing(_ key: String, in bytes: [UInt8]) throws -> [UInt8] {
+        var result = bytes
+        for entry in try entries(bytes) where entry.key == key {
+            result.replaceSubrange(
+                entry.valueStart..<entry.valueStart + entry.length,
+                with: repeatElement(0, count: entry.length))
+        }
+        return result
+    }
+
+    static func entries(_ bytes: [UInt8]) throws -> [Entry] {
         guard bytes.count >= 20 else { throw ParamSFOError.tooSmall }
         guard bytes[0..<4].elementsEqual([0x00, 0x50, 0x53, 0x46]) else {
             throw ParamSFOError.invalidMagic
         }
-
-        func u16(_ offset: Int) throws -> Int {
-            guard offset >= 0, offset + 2 <= bytes.count else { throw ParamSFOError.truncated }
-            return Int(bytes[offset]) | Int(bytes[offset + 1]) << 8
-        }
-        func u32(_ offset: Int) throws -> Int {
-            guard offset >= 0, offset + 4 <= bytes.count else { throw ParamSFOError.truncated }
-            return Int(bytes[offset]) | Int(bytes[offset + 1]) << 8 | Int(bytes[offset + 2]) << 16
-                | Int(bytes[offset + 3]) << 24
-        }
-
-        let keyTable = try u32(8)
-        let dataTable = try u32(12)
-        let count = try u32(16)
-        var values: [String: String] = [:]
+        let keyTable = try u32(bytes, 8)
+        let dataTable = try u32(bytes, 12)
+        let count = try u32(bytes, 16)
+        var entries: [Entry] = []
         for index in 0..<count {
             let entry = 20 + index * 16
-            let keyStart = keyTable + (try u16(entry))
-            let format = try u16(entry + 2)
-            let length = try u32(entry + 4)
-            let valueStart = dataTable + (try u32(entry + 12))
+            let keyStart = keyTable + (try u16(bytes, entry))
+            let format = try u16(bytes, entry + 2)
+            let length = try u32(bytes, entry + 4)
+            let valueStart = dataTable + (try u32(bytes, entry + 12))
             guard keyStart < bytes.count, let keyEnd = bytes[keyStart...].firstIndex(of: 0) else {
                 throw ParamSFOError.truncated
             }
             guard valueStart + length <= bytes.count else { throw ParamSFOError.truncated }
-
-            let key = String(decoding: bytes[keyStart..<keyEnd], as: UTF8.self)
-            if format == 0x0404, length >= 4 {
-                values[key] = String(try u32(valueStart))
-            } else {
-                var valueEnd = valueStart + length
-                while valueEnd > valueStart, bytes[valueEnd - 1] == 0 {
-                    valueEnd -= 1
-                }
-                values[key] = String(decoding: bytes[valueStart..<valueEnd], as: UTF8.self)
-            }
+            entries.append(
+                Entry(
+                    key: String(decoding: bytes[keyStart..<keyEnd], as: UTF8.self),
+                    format: format, valueStart: valueStart, length: length))
         }
-        return values
+        return entries
+    }
+
+    private static func u16(_ bytes: [UInt8], _ offset: Int) throws -> Int {
+        guard offset >= 0, offset + 2 <= bytes.count else { throw ParamSFOError.truncated }
+        return Int(bytes[offset]) | Int(bytes[offset + 1]) << 8
+    }
+
+    private static func u32(_ bytes: [UInt8], _ offset: Int) throws -> Int {
+        guard offset >= 0, offset + 4 <= bytes.count else { throw ParamSFOError.truncated }
+        return Int(bytes[offset]) | Int(bytes[offset + 1]) << 8 | Int(bytes[offset + 2]) << 16
+            | Int(bytes[offset + 3]) << 24
     }
 }
 

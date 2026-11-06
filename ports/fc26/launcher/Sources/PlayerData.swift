@@ -83,6 +83,7 @@ struct PlayerData {
     }
     var shaderCache: URL { user.appendingPathComponent("cache/\(titleID).zip") }
     var shaderBackups: URL { root.appendingPathComponent("shader-cache", isDirectory: true) }
+    var saveBackups: URL { root.appendingPathComponent("save-backups", isDirectory: true) }
     var logs: URL { root.appendingPathComponent("logs", isDirectory: true) }
     var consoleLog: URL { logs.appendingPathComponent("last-run.console.log") }
     var previousConsoleLog: URL { logs.appendingPathComponent("previous-run.console.log") }

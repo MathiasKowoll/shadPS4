@@ -12,6 +12,7 @@ struct LauncherView: View {
                 gameSection
                 playerSection
                 modulesSection
+                squadsSection
                 settingsSection
                 cacheAndLogsSection
             }
@@ -164,6 +165,34 @@ struct LauncherView: View {
                     + "sound may be missing. They are part of the PS4 system software: dump them "
                     + "from your own console, where they are in /system/common/lib. The launcher "
                     + "never includes or downloads them.")
+        }
+    }
+
+    private var squadsSection: some View {
+        Section {
+            if model.squads.isEmpty {
+                Text("No squad saves for this player yet.").foregroundStyle(.secondary)
+            } else {
+                ForEach(model.squads) { squad in
+                    LabeledContent(squad.displayName) {
+                        Text(squad.directoryName).foregroundStyle(.secondary)
+                    }
+                }
+            }
+            HStack {
+                Button("Install Squads…") { model.installSquads() }
+                    .disabled(model.isInstallingSquads)
+                Button("Open Saves Folder") { model.showSaves() }
+            }
+            .disabled(model.player == nil)
+        } header: {
+            Text("Squads")
+        } footer: {
+            Text(
+                "Install updated squads made for the PS4 version: a squads save folder, or a .zip "
+                    + "that contains one. Load them in the game from Customize > Profile > Load > "
+                    + "Squads. The launcher checks that the file is an FC 26 squads save, not who "
+                    + "made it; community squads are not supported by EA or by the port.")
         }
     }
 

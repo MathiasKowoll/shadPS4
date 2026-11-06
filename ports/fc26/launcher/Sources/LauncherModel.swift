@@ -55,6 +55,8 @@ final class LauncherModel {
     private(set) var configUnreadable = false
     private(set) var recentPlayers: [URL]
     private(set) var missingModules: [String] = []
+    private(set) var squads: [SquadSave] = []
+    private(set) var isInstallingSquads = false
     private(set) var cacheState = ShaderCacheState.empty
     private(set) var engineSettings = EngineSettings()
     private(set) var launcherSettings = LauncherSettings()
@@ -267,6 +269,7 @@ final class LauncherModel {
         playerError = nil
         configUnreadable = false
         missingModules = []
+        squads = []
         cacheState = .empty
         isCheckingPlayer = true
         Task.detached(priority: .userInitiated) {
@@ -292,6 +295,7 @@ final class LauncherModel {
         launcherSettings = snapshot.launcherSettings
         engineSettings = snapshot.engineSettings
         missingModules = snapshot.missingModules
+        squads = snapshot.squads
         if let cache = snapshot.cacheState {
             cacheState = cache
         }
@@ -300,6 +304,7 @@ final class LauncherModel {
     func refreshPlayerStatus() {
         guard let player else { return }
         missingModules = player.missingModules()
+        squads = SquadSaves.installed(in: player)
         Task.detached(priority: .utility) {
             let state = ShaderCacheGuard.inspect(player)
             await MainActor.run {
@@ -440,6 +445,62 @@ final class LauncherModel {
         } catch {
             showError("Modules could not be added", error.localizedDescription)
         }
+    }
+
+    func installSquads() {
+        guard let player else { return }
+        let panel = NSOpenPanel()
+        panel.title = "Install Squads"
+        panel.message =
+            "Choose an EA SPORTS FC 26 PS4 squads save: its folder (with DATA, INDEX and sce_sys) "
+            + "or a .zip that contains it."
+        panel.prompt = "Install"
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [.zip, .folder]
+        guard panel.runModal() == .OK, let source = panel.url else { return }
+        isInstallingSquads = true
+        Task.detached(priority: .userInitiated) {
+            let outcome: (SquadInstall?, String?)
+            do {
+                outcome = (try SquadSaves.install(from: source, into: player), nil)
+            } catch {
+                outcome = (nil, error.localizedDescription)
+            }
+            await MainActor.run {
+                LauncherModel.shared.finishSquadInstall(
+                    outcome.0, failure: outcome.1, for: player.root)
+            }
+        }
+    }
+
+    private func finishSquadInstall(_ install: SquadInstall?, failure: String?, for root: URL) {
+        isInstallingSquads = false
+        if player?.root == root {
+            refreshPlayerStatus()
+        }
+        guard let install else {
+            showError("Squads could not be installed", failure ?? "")
+            return
+        }
+        var message =
+            "Installed "
+            + install.installed.map { "“\($0.displayName)”" }.joined(separator: ", ")
+            + " for this player. In the game, load it from Customize > Profile > Load > Squads."
+        if !install.replacedBackups.isEmpty {
+            message +=
+                " The squad save it replaced was moved to "
+                + install.replacedBackups.map(EngineRun.display).joined(separator: ", ") + "."
+        }
+        showInfo("Squads installed", message)
+    }
+
+    func showSaves() {
+        guard let player else { return }
+        try? FileManager.default.createDirectory(
+            at: player.saves, withIntermediateDirectories: true)
+        NSWorkspace.shared.open(player.saves)
     }
 
     func openModulesFolder() {
@@ -807,6 +868,7 @@ private struct PlayerSnapshot {
     var launcherSettings = LauncherSettings()
     var engineSettings = EngineSettings()
     var missingModules: [String] = []
+    var squads: [SquadSave] = []
     var cacheState: ShaderCacheState?
 
     var isUsable: Bool { error == nil || configUnreadable }
@@ -827,6 +889,7 @@ private struct PlayerSnapshot {
             configUnreadable = true
         }
         missingModules = data.missingModules()
+        squads = SquadSaves.installed(in: data)
         if inspectCache {
             cacheState = ShaderCacheGuard.inspect(data)
         }

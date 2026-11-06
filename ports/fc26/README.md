@@ -210,23 +210,30 @@ Variables:
    are in `user/sys_modules/`, explains that they come from the player's own console, and copies
    chosen `.sprx` files there after checking for an ELF or SELF header. Missing modules are a
    warning, as in `run.sh`: the section always shows them, and Play asks once per player.
-4. Settings: fullscreen, frame-rate counter, upscaling (off, FSR with optional RCAS, or MetalFX;
+4. Squads: Install Squads takes a PS4 squads save of FC 26, as a folder or inside a `.zip`
+   (for example a community update), checks that its `param.sfo` is a save of `CUSA52342` and
+   its `DATA` is a `SaveType_Squads` body, and copies `DATA`, `INDEX`, `NAME`, `param.sfo` and
+   the icon to `user/home/1000/savedata/CUSA52342/<SAVEDATA_DIRECTORY>/`, with the param.sfo
+   `ACCOUNT_ID` set to zero like the emulator's own saves. A save with the same name is moved to
+   `save-backups/` first. The game loads it from Customize > Profile > Load > Squads; loading an
+   installed community save has not been confirmed in the port yet.
+5. Settings: fullscreen, frame-rate counter, upscaling (off, FSR with optional RCAS, or MetalFX;
    the engine prefers MetalFX when both are set, so the launcher offers one), PS4 Pro mode
    (experimental, `General.neo_mode`), the Metal HUD and a detailed log, all off except the
    frame-rate counter. Engine settings live in the player's `user/config.json`, as with
    `FC26_METALFX` and `FC26_PS4_PRO` in `run.sh`; the Metal HUD and log choices in `launcher.json`.
-5. Play: applies the defaults of `run.sh`'s performance profile (60 Hz vblank, flip-rate override
+6. Play: applies the defaults of `run.sh`'s performance profile (60 Hz vblank, flip-rate override
    0, logging off or the diagnostic filter, `SHADPS4_DEFER_UPLOADS`, `SHADPS4_ASYNC_IMAGE_READBACK`
    and `SHADPS4_FAULT_EXPAND` set to 1, frame metrics in `metrics/last-run.csv`) and starts the
    engine from the player folder. It refuses to start without Rosetta 2, while another
    shadPS4 engine runs (also under a renamed binary such as `shadps4.diag`), or while another
    launcher uses the same player folder. The first run with an empty
    shader cache explains that early runs stutter while shaders compile.
-6. Shader cache: before and after every run the launcher tests `user/cache/CUSA52342.zip`. A
+7. Shader cache: before and after every run the launcher tests `user/cache/CUSA52342.zip`. A
    valid archive is copied to `shader-cache/backup.zip`; an archive left incomplete by a crash is
    kept as `shader-cache/damaged.zip` and replaced by that backup, or by the latest `run.sh`
    snapshot in a development data folder. Quitting the launcher waits for the check after a run.
-7. Logs: each run writes `logs/last-run.console.log` with a header naming the engine revision,
+8. Logs: each run writes `logs/last-run.console.log` with a header naming the engine revision,
    game, player folder and settings, and keeps the previous run next to it. The detailed log goes
    to `user/log/`. The launcher shows both, and the exit code after an unexpected stop.
 
