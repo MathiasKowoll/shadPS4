@@ -215,8 +215,9 @@ Variables:
    its `DATA` is a `SaveType_Squads` body, and copies `DATA`, `INDEX`, `NAME`, `param.sfo` and
    the icon to `user/home/1000/savedata/CUSA52342/<SAVEDATA_DIRECTORY>/`, with the param.sfo
    `ACCOUNT_ID` set to zero like the emulator's own saves. A save with the same name is moved to
-   `save-backups/` first. The game loads it from Customize > Profile > Load > Squads; loading an
-   installed community save has not been confirmed in the port yet.
+   `save-backups/` first. The game loads it from Customize > Profile > Load > Squads. On
+   2026-11-06 the user loaded the PlayStation Pulse squads installed this way in the port; the
+   exact menu labels and whether the loaded squads survive a restart are not checked yet.
 5. Settings: fullscreen, frame-rate counter, upscaling, PS4 Pro mode (experimental,
    `General.neo_mode`), 60 FPS in menus, the Metal HUD and a detailed log. New player folders
    start in fullscreen, so macOS Game Mode turns on (below), with the frame-rate counter and 60
