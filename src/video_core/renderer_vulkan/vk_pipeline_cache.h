@@ -35,6 +35,7 @@ struct Info;
 namespace Vulkan {
 
 class Instance;
+class PreloadProgress;
 class Scheduler;
 class ShaderCache;
 
@@ -78,7 +79,7 @@ public:
 
     void WarmUp();
     void Sync();
-    void CompilePreloadedPipelines();
+    void CompilePreloadedPipelines(PreloadProgress& progress);
 
     bool LoadComputePipeline(Serialization::Archive& ar);
     bool LoadGraphicsPipeline(Serialization::Archive& ar);

@@ -3,11 +3,14 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstddef>
+#include <cstdio>
 #include <cstdlib>
 #include <thread>
 #include <xxhash.h>
 
+#include "common/polyfill_thread.h"
 #include "common/serdes.h"
 #include "core/emulator_settings.h"
 #include "shader_recompiler/frontend/fetch_shader.h"
@@ -342,6 +345,61 @@ bool PipelineCache::LoadPipelineStage(Serialization::Archive& ar, size_t stage) 
     return true;
 }
 
+class PreloadProgress {
+public:
+    explicit PreloadProgress(const char* path) {
+        if (path == nullptr || path[0] == '\0') {
+            return;
+        }
+        file = std::fopen(path, "w");
+        if (file == nullptr) {
+            return;
+        }
+        std::fputs("elapsed_seconds,pipelines,total,finished\n", file);
+        Write(false);
+        reporter = std::jthread([this](std::stop_token stop) {
+            while (Common::StoppableTimedWait(stop, std::chrono::milliseconds(100))) {
+                Write(false);
+            }
+        });
+    }
+
+    ~PreloadProgress() {
+        if (file == nullptr) {
+            return;
+        }
+        reporter.request_stop();
+        reporter.join();
+        Write(true);
+        std::fclose(file);
+    }
+
+    PreloadProgress(const PreloadProgress&) = delete;
+    PreloadProgress& operator=(const PreloadProgress&) = delete;
+
+    void SetTotal(size_t count) {
+        total = count;
+    }
+
+    void Advance() {
+        ++pipelines;
+    }
+
+private:
+    void Write(bool finished) {
+        const std::chrono::duration<double> elapsed = std::chrono::steady_clock::now() - start;
+        std::fprintf(file, "%.3f,%zu,%zu,%d\n", elapsed.count(), pipelines.load(), total.load(),
+                     finished ? 1 : 0);
+        std::fflush(file);
+    }
+
+    const std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+    std::FILE* file{};
+    std::atomic<size_t> pipelines{};
+    std::atomic<size_t> total{};
+    std::jthread reporter;
+};
+
 void PipelineCache::WarmUp() {
     if (!EmulatorSettings.IsPipelineCacheEnabled()) {
         return;
@@ -429,6 +487,7 @@ void PipelineCache::WarmUp() {
     }
     defer_preload_compile = preload_threads > 1;
 
+    PreloadProgress progress{std::getenv("SHADPS4_PRELOAD_PROGRESS_PATH")};
     u32 num_pipelines{};
     u32 num_total_pipelines{};
 
@@ -457,10 +516,14 @@ void PipelineCache::WarmUp() {
 
             if (result) {
                 ++num_pipelines;
+                if (!defer_preload_compile) {
+                    progress.Advance();
+                }
             }
         });
 
-    CompilePreloadedPipelines();
+    progress.SetTotal(num_pipelines);
+    CompilePreloadedPipelines(progress);
 
     LOG_INFO(Render, "Preloaded {} pipelines", num_pipelines);
     if (num_total_pipelines > num_pipelines) {
@@ -471,7 +534,7 @@ void PipelineCache::WarmUp() {
     Storage::DataBase::Instance().FinishPreload();
 }
 
-void PipelineCache::CompilePreloadedPipelines() {
+void PipelineCache::CompilePreloadedPipelines(PreloadProgress& progress) {
     const size_t num_graphics = graphics_preloads.size();
     const size_t num_total = num_graphics + compute_preloads.size();
     std::atomic<size_t> next{};
@@ -490,6 +553,7 @@ void PipelineCache::CompilePreloadedPipelines() {
                     instance, scheduler, desc_heap, profile, *pipeline_cache, preload.key,
                     *preload.info, preload.module, preload.sdata, true);
             }
+            progress.Advance();
         }
     };
     const u32 num_workers = preload_threads - 1u;
