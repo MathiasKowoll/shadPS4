@@ -122,10 +122,29 @@ they join it:
    defect, fixed on branch `fc26-fix-aio`, that does not change this).
    Player workaround: on Match Preview, wait about 3 seconds before Start Match. The Select Kits
    rotation recorded earlier worked for the same reason: it keeps the player on Match Preview.
-2. Occasional flashes or artifacts in cinematics; the crowd card display in the first cinematic
-   alternates good and broken frames.
-3. Play still drops below 60 in heavier camera angles; the GPU thread (`GpuCommandProcessor`) is
-   the bottleneck at 80-90% of a core while the Mac GPU sits near 55%.
+2. Intermittent corruption in the intro and in play, mostly in replays and close cameras: exploded
+   geometry (huge shards across the screen), black polygons or black screens, and blocks of noise,
+   also over the LED boards. Measured on 2026-11-06 with scripted runs:
+   - Slower loading makes it worse. Right after a 68 GB read had emptied the macOS file cache, the
+     intro was broken all through and play showed a black pitch at 10-16 FPS. Delaying the game's
+     file reads during the match load (`SHADPS4_READ_LATENCY_US`, `SHADPS4_READ_US_PER_MB` and
+     `SHADPS4_READ_SLOW_FILE`, tag `fc26-diag-2026-11-06`) reproduces it.
+   - It is not caused by texture evictions: with `SHADPS4_GPU_MEMORY_BUDGET_MB=40000` the cache
+     evicted nothing and a replay still showed noise, the intro still showed shards. Nor by the
+     settings save or the shader cache.
+   - Readback modes cannot be the workaround: Precise aborts on macOS ("protect region as
+     write-only"), Disabled freezes the intro.
+   - A real race is fixed on branch `fc26-fix-image-refresh-race`: `RefreshImage` copied guest
+     memory and `Runtime::UploadImage` cleared the dirty flags afterwards, without the image lock,
+     so a CPU write between the two was lost. It cleared the intro in two slow-storage runs, but
+     play still broke in two normal runs, so it is not the main cause and stays off the base.
+   - It showed in the runs that waited on Match Preview (keepers right) more often than in the
+     quick ones, but one quick run had it too.
+   Next step: trace the exact frame of an artifact and compare it with a clean one.
+3. Frame rate, measured with the test save (rain, 4:00 PM): wide play at 39-46 FPS; the match intro
+   at 8-23 FPS with 1000-2400 draws a frame, the crowd card shot at 8-11. Cinematics do not hold
+   30. The GPU thread (`GpuCommandProcessor`) is the bottleneck at 80-90% of a core while the Mac
+   GPU sits near 55%.
 4. Some textures stay black (corner flag pole, pitch-side camera, a large panel behind the pause
    menu): in the 2026-11-05 match, 17 textures were uploaded while their memory was still zero and
    were not uploaded again. Suspected, not yet measured: `InvalidateMemoryFromGPU` only marks the
