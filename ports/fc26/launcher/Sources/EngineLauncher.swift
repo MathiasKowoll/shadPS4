@@ -106,7 +106,7 @@ struct EngineRun {
             environment["DYLD_LIBRARY_PATH"].map { "\(engine.directory.path):\($0)" }
             ?? engine.directory.path
         environment["SHADPS4_FRAME_METRICS_PATH"] = data.metricsFile.path
-        environment["SHADPS4_VIDEOOUT_FLIP_RATE_OVERRIDE"] = "0"
+        environment.removeValue(forKey: "SHADPS4_VIDEOOUT_FLIP_RATE_OVERRIDE")
         for key in [
             "SHADPS4_DEFER_UPLOADS", "SHADPS4_ASYNC_IMAGE_READBACK", "SHADPS4_FAULT_EXPAND",
         ]

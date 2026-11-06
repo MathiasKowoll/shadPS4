@@ -224,10 +224,11 @@ Variables:
    optional RCAS, or MetalFX; the engine prefers MetalFX when both are set. Engine settings live
    in the player's `user/config.json`, as with `FC26_METALFX` and `FC26_PS4_PRO` in `run.sh`; the
    Metal HUD and log choices in `launcher.json`.
-6. Play: applies the defaults of `run.sh`'s performance profile (60 Hz vblank, flip-rate override
-   0, logging off or the diagnostic filter, `SHADPS4_DEFER_UPLOADS`, `SHADPS4_ASYNC_IMAGE_READBACK`
-   and `SHADPS4_FAULT_EXPAND` set to 1, frame metrics in `metrics/last-run.csv`) and starts the
-   engine from the player folder. It refuses to start without Rosetta 2, while another
+6. Play: applies the defaults of `run.sh`'s performance profile (60 Hz vblank, the game's own
+   flip rate with no override, so menus run at 30 as the game asks and play at 60, logging off or
+   the diagnostic filter, `SHADPS4_DEFER_UPLOADS`, `SHADPS4_ASYNC_IMAGE_READBACK` and
+   `SHADPS4_FAULT_EXPAND` set to 1, frame metrics in `metrics/last-run.csv`) and starts the engine
+   from the player folder. It refuses to start without Rosetta 2, while another
    shadPS4 engine runs (also under a renamed binary such as `shadps4.diag`), or while another
    launcher uses the same player folder. The first run with an empty
    shader cache explains that early runs stutter while shaders compile.
