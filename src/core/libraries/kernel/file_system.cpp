@@ -707,6 +707,23 @@ void SimulateSlowStorage(const Core::FileSys::File* file, s64 bytes) {
         !file->m_guest_name.starts_with("/app0/")) {
         return;
     }
+    // SHADPS4_READ_SLOW_FILE=<path>: only while that file exists (checked every 500 ms), so a
+    // script can slow one load without slowing the boot and the menus.
+    static const char* gate = std::getenv("SHADPS4_READ_SLOW_FILE");
+    if (gate != nullptr && gate[0] != '\0') {
+        static std::atomic<s64> next_check{};
+        static std::atomic<bool> gate_open{};
+        const s64 now = std::chrono::steady_clock::now().time_since_epoch().count();
+        s64 next = next_check.load(std::memory_order_relaxed);
+        if (now >= next && next_check.compare_exchange_strong(next, now + 500'000'000,
+                                                              std::memory_order_relaxed)) {
+            std::error_code ec;
+            gate_open.store(std::filesystem::exists(gate, ec), std::memory_order_relaxed);
+        }
+        if (!gate_open.load(std::memory_order_relaxed)) {
+            return;
+        }
+    }
     const u64 delay = config.first + config.second * static_cast<u64>(bytes) / (1024 * 1024);
     if (delay != 0) {
         std::this_thread::sleep_for(std::chrono::microseconds(delay));
