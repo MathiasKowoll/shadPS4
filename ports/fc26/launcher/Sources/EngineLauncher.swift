@@ -106,6 +106,7 @@ struct EngineRun {
             environment["DYLD_LIBRARY_PATH"].map { "\(engine.directory.path):\($0)" }
             ?? engine.directory.path
         environment["SHADPS4_FRAME_METRICS_PATH"] = data.metricsFile.path
+        environment["SHADPS4_PRELOAD_PROGRESS_PATH"] = data.preloadFile.path
         if launcherSettings.menusAt60 {
             environment["SHADPS4_VIDEOOUT_FLIP_RATE_OVERRIDE"] = "0"
         } else {
@@ -134,6 +135,8 @@ struct EngineRun {
         try manager.createDirectory(at: data.metrics, withIntermediateDirectories: true)
         Self.rotate(data.consoleLog, to: data.previousConsoleLog)
         Self.rotate(data.metricsFile, to: data.metrics.appendingPathComponent("previous-run.csv"))
+        Self.rotate(
+            data.preloadFile, to: data.metrics.appendingPathComponent("previous-run-preload.csv"))
         guard manager.createFile(atPath: data.consoleLog.path, contents: Data(header.utf8)) else {
             throw CocoaError(
                 .fileWriteUnknown, userInfo: [NSFilePathErrorKey: data.consoleLog.path])
@@ -196,6 +199,42 @@ struct EngineRun {
     private static func rotate(_ current: URL, to previous: URL) {
         guard FileManager.default.fileExists(atPath: current.path) else { return }
         rename(current.path, previous.path)
+    }
+}
+
+struct ShaderPreload: Equatable {
+    let elapsed: Double
+    let pipelines: Int
+    let total: Int
+    let finished: Bool
+
+    var summary: String {
+        total > 0
+            ? "Preparing shaders: \(pipelines.formatted()) of \(total.formatted()) pipelines."
+            : "Preparing shaders…"
+    }
+
+    static func read(_ file: URL) -> ShaderPreload? {
+        guard let handle = try? FileHandle(forReadingFrom: file) else { return nil }
+        defer { try? handle.close() }
+        guard let size = try? handle.seekToEnd(),
+            (try? handle.seek(toOffset: size > 256 ? size - 256 : 0)) != nil,
+            let data = try? handle.readToEnd()
+        else {
+            return nil
+        }
+        let lines = String(decoding: data, as: UTF8.self).split(
+            separator: "\n", omittingEmptySubsequences: false)
+        for line in lines.dropLast().reversed() {
+            let fields = line.split(separator: ",")
+            if fields.count == 4, let elapsed = Double(fields[0]), let pipelines = Int(fields[1]),
+                let total = Int(fields[2]), let finished = Int(fields[3])
+            {
+                return ShaderPreload(
+                    elapsed: elapsed, pipelines: pipelines, total: total, finished: finished == 1)
+            }
+        }
+        return nil
     }
 }
 

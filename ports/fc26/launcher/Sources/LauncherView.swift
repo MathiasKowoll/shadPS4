@@ -311,12 +311,18 @@ struct LauncherView: View {
         case .preparing:
             Label("Preparing the shader cache and settings…", systemImage: "hourglass")
         case .running(let since):
-            Label {
-                Text(
-                    "Playing since \(since.formatted(date: .omitted, time: .shortened)). Quit the "
-                        + "game with ⌘Q in its window.")
-            } icon: {
-                Image(systemName: "gamecontroller.fill")
+            if let preload = model.shaderPreload, !preload.finished {
+                Label(
+                    preload.summary + " The game starts when this finishes.",
+                    systemImage: "hourglass")
+            } else {
+                Label {
+                    Text(
+                        "Playing since \(since.formatted(date: .omitted, time: .shortened)). Quit "
+                            + "the game with ⌘Q in its window.")
+                } icon: {
+                    Image(systemName: "gamecontroller.fill")
+                }
             }
         case .finishing:
             Label("Saving the shader cache…", systemImage: "hourglass")

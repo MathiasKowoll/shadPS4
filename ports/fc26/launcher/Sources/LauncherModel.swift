@@ -63,6 +63,7 @@ final class LauncherModel {
     private(set) var engineSettings = EngineSettings()
     private(set) var launcherSettings = LauncherSettings()
     private(set) var runState = RunState.idle
+    private(set) var shaderPreload: ShaderPreload?
     private(set) var lastRun: LastRun?
     private(set) var isCheckingGame = false
     private(set) var isCheckingPlayer = false
@@ -72,6 +73,8 @@ final class LauncherModel {
     private var hashGeneration = 0
     private var hashTask: Task<Void, Never>?
     private var process: Process?
+    private var preloadTask: Task<Void, Never>?
+    private let preloadPanel = PreloadPanel()
     private var lock: PlayerDataLock?
     private var stopRequested = false
     private var pendingTermination = false
@@ -771,6 +774,7 @@ final class LauncherModel {
                 }
             }
             runState = .running(since: started)
+            watchPreload(player.preloadFile, started: started)
         } catch {
             finishWithoutRun()
             showError("The game engine could not be started", error.localizedDescription)
@@ -783,6 +787,40 @@ final class LauncherModel {
         process = nil
     }
 
+    private func watchPreload(_ file: URL, started: Date) {
+        preloadTask = Task { @MainActor in
+            while !Task.isCancelled {
+                let preload = await Task.detached { ShaderPreload.read(file) }.value
+                guard !Task.isCancelled else { return }
+                self.showPreload(preload)
+                if preload?.finished == true
+                    || (preload == nil && Date().timeIntervalSince(started) > 120)
+                {
+                    return
+                }
+                try? await Task.sleep(for: .milliseconds(250))
+            }
+        }
+    }
+
+    private func showPreload(_ preload: ShaderPreload?) {
+        if shaderPreload != preload {
+            shaderPreload = preload
+        }
+        if let preload, !preload.finished, preload.elapsed >= 1 {
+            preloadPanel.show(preload)
+        } else {
+            preloadPanel.close()
+        }
+    }
+
+    private func stopWatchingPreload() {
+        preloadTask?.cancel()
+        preloadTask = nil
+        shaderPreload = nil
+        preloadPanel.close()
+    }
+
     private func engineExited(
         status: Int32, reason: Process.TerminationReason, started: Date, player: PlayerData
     ) {
@@ -790,6 +828,7 @@ final class LauncherModel {
         let crashed = reason == .uncaughtSignal || status != 0
         let ended = Date()
         process = nil
+        stopWatchingPreload()
         runState = .finishing
         let revision = buildInfo?.engineRevision ?? "unknown"
         Task.detached(priority: .userInitiated) {

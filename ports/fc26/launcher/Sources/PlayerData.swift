@@ -91,6 +91,7 @@ struct PlayerData {
     var previousConsoleLog: URL { logs.appendingPathComponent("previous-run.console.log") }
     var metrics: URL { root.appendingPathComponent("metrics", isDirectory: true) }
     var metricsFile: URL { metrics.appendingPathComponent("last-run.csv") }
+    var preloadFile: URL { metrics.appendingPathComponent("last-run-preload.csv") }
     var launcherSettingsFile: URL { root.appendingPathComponent("launcher.json") }
     var lockFile: URL { root.appendingPathComponent(".launcher.lock") }
 
