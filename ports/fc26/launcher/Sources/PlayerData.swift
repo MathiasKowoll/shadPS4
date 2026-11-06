@@ -1,11 +1,28 @@
 import Darwin
 import Foundation
 
+enum Upscaler: String, CaseIterable, Identifiable {
+    case none
+    case fsr
+    case metalFX
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .none: "Off"
+        case .fsr: "FSR"
+        case .metalFX: "MetalFX"
+        }
+    }
+}
+
 struct EngineSettings: Equatable {
     var fullscreen = false
-    var fsr = false
+    var upscaler = Upscaler.none
     var rcas = false
     var showFPS = true
+    var ps4Pro = false
 }
 
 struct LauncherSettings: Codable, Equatable {
@@ -169,9 +186,14 @@ struct PlayerData {
         let general = config["General"] as? [String: Any] ?? [:]
         var settings = EngineSettings()
         settings.fullscreen = gpu["full_screen"] as? Bool ?? settings.fullscreen
-        settings.fsr = gpu["fsr_enabled"] as? Bool ?? settings.fsr
-        settings.rcas = gpu["rcas_enabled"] as? Bool ?? settings.rcas
+        if gpu["metalfx_enabled"] as? Bool == true {
+            settings.upscaler = .metalFX
+        } else if gpu["fsr_enabled"] as? Bool == true {
+            settings.upscaler = .fsr
+        }
+        settings.rcas = settings.upscaler == .fsr && gpu["rcas_enabled"] as? Bool == true
         settings.showFPS = general["show_fps_counter"] as? Bool ?? settings.showFPS
+        settings.ps4Pro = general["neo_mode"] as? Bool ?? settings.ps4Pro
         return settings
     }
 
@@ -181,10 +203,13 @@ struct PlayerData {
             &config, "GPU",
             [
                 "full_screen": settings.fullscreen,
-                "fsr_enabled": settings.fsr,
-                "rcas_enabled": settings.rcas,
+                "fsr_enabled": settings.upscaler == .fsr,
+                "rcas_enabled": settings.upscaler == .fsr && settings.rcas,
+                "metalfx_enabled": settings.upscaler == .metalFX,
             ])
-        merge(&config, "General", ["show_fps_counter": settings.showFPS])
+        merge(
+            &config, "General",
+            ["show_fps_counter": settings.showFPS, "neo_mode": settings.ps4Pro])
         try writeEngineConfig(config)
     }
 

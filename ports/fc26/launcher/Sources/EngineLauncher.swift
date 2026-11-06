@@ -172,9 +172,10 @@ struct EngineRun {
         }
         lines += [
             "Player data: \(Self.display(data.root))",
-            "Settings: fullscreen \(enabled(settings.fullscreen)), FSR \(enabled(settings.fsr)), "
-                + "RCAS \(enabled(settings.rcas)), frame rate \(enabled(settings.showFPS)), "
-                + "Metal HUD \(enabled(launcherSettings.metalHUD)), detailed log "
+            "Settings: fullscreen \(enabled(settings.fullscreen)), upscaling "
+                + "\(settings.upscaler.title), RCAS \(enabled(settings.rcas)), PS4 Pro mode "
+                + "\(enabled(settings.ps4Pro)), frame rate \(enabled(settings.showFPS)), Metal HUD "
+                + "\(enabled(launcherSettings.metalHUD)), detailed log "
                 + "\(enabled(launcherSettings.diagnosticLog))",
             "Missing system modules: \(data.missingModules().joined(separator: ", ").nonEmpty ?? "none")",
             "Started: \(ISO8601DateFormatter().string(from: Date()))",

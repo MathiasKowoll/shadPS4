@@ -391,7 +391,7 @@ final class LauncherModel {
     func updateEngineSettings(_ change: (inout EngineSettings) -> Void) {
         var settings = engineSettings
         change(&settings)
-        if !settings.fsr {
+        if settings.upscaler != .fsr {
             settings.rcas = false
         }
         guard settings != engineSettings, let player else { return }

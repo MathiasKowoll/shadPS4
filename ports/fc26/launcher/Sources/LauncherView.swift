@@ -171,18 +171,25 @@ struct LauncherView: View {
         Section {
             Toggle("Fullscreen", isOn: engineBinding(\.fullscreen))
             Toggle("Show frame rate", isOn: engineBinding(\.showFPS))
-            Toggle("FSR upscaling", isOn: engineBinding(\.fsr))
+            Picker("Upscaling", selection: upscalerBinding) {
+                ForEach(Upscaler.allCases) { Text($0.title).tag($0) }
+            }
+            .pickerStyle(.segmented)
             Toggle("RCAS sharpening", isOn: engineBinding(\.rcas))
-                .disabled(!model.engineSettings.fsr)
+                .disabled(model.engineSettings.upscaler != .fsr)
+            Toggle("PS4 Pro mode (experimental)", isOn: engineBinding(\.ps4Pro))
             Toggle("Metal performance HUD", isOn: launcherBinding(\.metalHUD))
         } header: {
             Text("Settings")
         } footer: {
             Text(
-                "The game always renders at 1920×1080, the validated baseline. FSR and RCAS only "
-                    + "change how that image is scaled and sharpened for your display. The Metal HUD "
-                    + "is Apple's performance overlay for diagnostics. Connect your controller "
-                    + "before you press Play.")
+                "The game always renders at 1920×1080, the validated baseline. Upscaling only "
+                    + "changes how that image reaches your display: FSR, with optional RCAS "
+                    + "sharpening, or Apple's MetalFX, which also gives the window full Retina "
+                    + "resolution. PS4 Pro mode tells the game it runs on a PS4 Pro; it is "
+                    + "experimental, and the known issue is a square of noise around the "
+                    + "controlled-player marker. The Metal HUD is Apple's performance overlay for "
+                    + "diagnostics. Connect your controller before you press Play.")
         }
         .disabled(model.player == nil || model.configUnreadable)
     }
@@ -313,6 +320,12 @@ struct LauncherView: View {
             ?? info.launcherVersion
         return "Launcher \(launcher) · engine \(info.engineRevision) · KosmicKrisp "
             + info.kosmicKrispRevision
+    }
+
+    private var upscalerBinding: Binding<Upscaler> {
+        Binding(
+            get: { model.engineSettings.upscaler },
+            set: { value in model.updateEngineSettings { $0.upscaler = value } })
     }
 
     private func engineBinding(_ keyPath: WritableKeyPath<EngineSettings, Bool>) -> Binding<Bool> {

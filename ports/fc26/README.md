@@ -210,9 +210,11 @@ Variables:
    are in `user/sys_modules/`, explains that they come from the player's own console, and copies
    chosen `.sprx` files there after checking for an ELF or SELF header. Missing modules are a
    warning, as in `run.sh`: the section always shows them, and Play asks once per player.
-4. Settings: fullscreen, frame-rate counter, FSR, RCAS (only with FSR), the Metal HUD and a
-   detailed log, all off except the frame-rate counter. Engine settings live in the player's
-   `user/config.json`; the Metal HUD and log choices in `launcher.json`.
+4. Settings: fullscreen, frame-rate counter, upscaling (off, FSR with optional RCAS, or MetalFX;
+   the engine prefers MetalFX when both are set, so the launcher offers one), PS4 Pro mode
+   (experimental, `General.neo_mode`), the Metal HUD and a detailed log, all off except the
+   frame-rate counter. Engine settings live in the player's `user/config.json`, as with
+   `FC26_METALFX` and `FC26_PS4_PRO` in `run.sh`; the Metal HUD and log choices in `launcher.json`.
 5. Play: applies the defaults of `run.sh`'s performance profile (60 Hz vblank, flip-rate override
    0, logging off or the diagnostic filter, `SHADPS4_DEFER_UPLOADS`, `SHADPS4_ASYNC_IMAGE_READBACK`
    and `SHADPS4_FAULT_EXPAND` set to 1, frame metrics in `metrics/last-run.csv`) and starts the
