@@ -10,7 +10,7 @@ enum Upscaler: String, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
-        case .none: "Off"
+        case .none: "Bilinear"
         case .fsr: "FSR"
         case .metalFX: "MetalFX"
         }

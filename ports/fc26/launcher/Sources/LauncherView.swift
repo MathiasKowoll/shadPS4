@@ -213,9 +213,9 @@ struct LauncherView: View {
         } footer: {
             Text(
                 "The game always renders at 1920×1080, the validated baseline. Upscaling only "
-                    + "changes how that image reaches your display: FSR, with optional RCAS "
-                    + "sharpening, or Apple's MetalFX, which also gives the window full Retina "
-                    + "resolution. PS4 Pro mode tells the game it runs on a PS4 Pro; it is "
+                    + "changes how that image reaches your display: Bilinear filtering (the "
+                    + "default), FSR with optional RCAS sharpening, or Apple's MetalFX, which also "
+                    + "gives the window full Retina resolution. PS4 Pro mode tells the game it runs on a PS4 Pro; it is "
                     + "experimental, and the known issue is a square of noise around the "
                     + "controlled-player marker. The Metal HUD is Apple's performance overlay for "
                     + "diagnostics. Connect your controller before you press Play.")
