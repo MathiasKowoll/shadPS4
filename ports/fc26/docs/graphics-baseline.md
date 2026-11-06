@@ -130,6 +130,36 @@ camera shows straight dark diagonal lines and drops on the lens; they look like 
 rig and the rain, but they were not compared with the scaler off. Still not covered: tunnel or
 walkout, a played match from kickoff to the final whistle, and return to the menu.
 
+### Experimental option: PS4 Pro mode (not part of the base)
+
+`FC26_PS4_PRO=1`, recorded on 2026-11-05.
+- Setup: build `415fc971`, MetalFX on, a 1600x900 point window, warm cache.
+- One run per mode through Kick Off, Manchester United against Liverpool. The Pro run had rain;
+  the base run had dry weather.
+
+Results:
+- **Output resolution:** the game registers 1920x1080 buffers in both modes, because the reported
+  display is 1080p (`GPU.internal_screen_width/height`). It has not been tested with a reported 4K
+  display.
+- **Play, 165 one-second samples per mode:** the weather differed, so these small gaps are within
+  scene noise.
+
+  | | Pro | Base |
+  |---|---|---|
+  | FPS | 51.3 | 52.5 |
+  | GPU device utilization | 53.0% | 54.4% |
+  | GPU renderer utilization | 69.4% | 64.4% |
+  | Draws per frame | 549 | 526 |
+
+- **Shader compiles:** 5 new graphics pipelines in the first Pro run, about 2 s of compile time in
+  menus and at kickoff. None in the base run.
+- **New defect with Pro:** the controlled-player triangle has a square of noise around it where
+  the icon should be transparent. The base mode draws it clean in the same build.
+- **Unchanged as far as the screenshots show:** LED boards, the ball, crowds and kits. The user
+  found the image good apart from the icon.
+- **Goalkeeper:** he wore the outfield kit in both runs (known issue 1), so Pro mode is not its
+  cause.
+
 Tried and removed because they caused regressions or showed no gain: a 64 KB head for unbounded
 buffers in session tracking (exploded crowd-card geometry), the eviction sentinel for clean images
 (lost GPU-made textures: LED boards, ball, goalkeeper legs), render-pass merges for clear flags
