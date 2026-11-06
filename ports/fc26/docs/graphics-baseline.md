@@ -104,13 +104,22 @@ Defaults that define the base:
 Known issues in the base, to be fixed one at a time and validated against these scenes before
 they join it:
 
-1. Goalkeepers wear the outfield kit with a warm shader cache; with a cold cache they wear their
-   own. The kit is decided while the match loads.
+1. Goalkeepers sometimes wear the outfield kit. With a warm shader cache it happened in two of
+   three runs of one build and data folder on 2026-11-05 and not in the third, so the cache alone
+   does not decide it. The kit is decided while the match loads.
 2. Occasional flashes or artifacts in cinematics.
 3. Play still drops below 60 in heavier camera angles; the GPU thread (`GpuCommandProcessor`) is
    the bottleneck at 80-90% of a core while the Mac GPU sits near 55%.
 
-### Pending option: MetalFX upscaling (not part of the base)
+### Second base: the 60 FPS commits
+
+On 2026-11-05 the user declared the match base plus the ten commits of branch
+`fc26-perf-metalfx` the new base (tag `fc26-base-2026-11-05b`). They add two options that stay
+off by default, MetalFX upscaling and PS4 Pro mode (below), and diagnostic switches that only act
+when their variables are set. With the defaults the code paths of the match base are unchanged.
+The runs recorded below had MetalFX on; a match with this base's defaults is still to be played.
+
+### Option: MetalFX upscaling (off by default)
 
 Branch `fc26-perf-metalfx`, recorded on 2026-11-05 with a 1600x900 point window (3200x1800
 pixels). Covered: main menu, Kick Off screen, kickoff wide camera and play, pause menu; MetalFX and
@@ -130,7 +139,7 @@ camera shows straight dark diagonal lines and drops on the lens; they look like 
 rig and the rain, but they were not compared with the scaler off. Still not covered: tunnel or
 walkout, a played match from kickoff to the final whistle, and return to the menu.
 
-### Experimental option: PS4 Pro mode (not part of the base)
+### Experimental option: PS4 Pro mode (off by default)
 
 `FC26_PS4_PRO=1`, recorded on 2026-11-05.
 - Setup: build `415fc971`, MetalFX on, a 1600x900 point window, warm cache.
