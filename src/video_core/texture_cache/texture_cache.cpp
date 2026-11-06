@@ -335,7 +335,39 @@ void TextureCache::InvalidateMemoryFromGPU(VAddr address, size_t max_size) {
 }
 
 void TextureCache::MarkAsMaybeGpuDirty(VAddr addr, size_t size) {
+    // SHADPS4_GPU_WRITE_LOG=1: log, once per image, a memory-sourced image that a GPU write makes
+    // stale below.
+    static const bool write_log = [] {
+        const char* value = std::getenv("SHADPS4_GPU_WRITE_LOG");
+        return value != nullptr && value[0] == '1';
+    }();
     ForEachImageInRegion(addr, size, [&](ImageId image_id, Image& image) {
+        // An image whose contents are exactly its last upload reads the memory under it, so a GPU
+        // write over any part of that memory makes it stale, and uploading it again from the
+        // written buffer gives what the console would show. InvalidateMemoryFromGPU only catches
+        // images that start at the written address (and the ones packed right after them), so an
+        // image inside a larger write kept its old contents: in an FC26 match, 17 textures were
+        // uploaded while their memory was still zero and never again, and corner flags and
+        // pitch-side props stayed black. Images the GPU drew into or copied into are left alone:
+        // their contents are not in memory.
+        if (True(image.flags & ImageFlagBits::MemorySourced) &&
+            False(image.flags & (ImageFlagBits::GpuModified | ImageFlagBits::GpuDirty))) {
+            {
+                std::scoped_lock lk{image.mutex};
+                image.flags |= ImageFlagBits::GpuDirty;
+            }
+            if (write_log) {
+                static std::unordered_set<VAddr> logged;
+                if (logged.insert(image.info.guest_address).second) {
+                    LOG_INFO(Render_Vulkan,
+                             "GPU write {:#x}+{:#x} makes memory-sourced image {:#x}+{:#x} {}x{} {} "
+                             "stale",
+                             addr, size, image.info.guest_address, image.info.guest_size,
+                             image.info.size.width, image.info.size.height,
+                             vk::to_string(image.info.pixel_format));
+                }
+            }
+        }
         // The hash is only read when the image is evicted with valid GPU data. A CpuDirty or
         // GpuDirty image gets valid data back only through a refresh, which resets the hash, or
         // through a whole-image GPU copy that is newer than this write, so hashing it now is

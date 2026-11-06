@@ -34,6 +34,8 @@ enum ImageFlagBits : u32 {
                        ///< cache)
     Dirty = MaybeCpuDirty | CpuDirty | GpuDirty,
     GpuModified = 1 << 3, ///< Contents have been modified from the GPU
+    MemorySourced = 1 << 4, ///< Contents are exactly the last upload from guest memory or
+                            ///< buffer data: nothing on the GPU has copied into the image
     Registered = 1 << 6,  ///< True when the image is registered
 };
 DECLARE_ENUM_FLAG_OPERATORS(ImageFlagBits)
