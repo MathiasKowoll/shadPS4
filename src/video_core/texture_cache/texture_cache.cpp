@@ -1059,6 +1059,17 @@ void TextureCache::RefreshImage(Image& image) {
         return;
     }
 
+    // Clear the dirty flags before guest memory is read, under the lock InvalidateMemory takes.
+    // The image is tracked here, so a CPU write that lands after this point faults and marks it
+    // dirty again, and the next use uploads it. Clearing them after the copy dropped such writes:
+    // a texture the game was still filling (a streamed mip, a reused slot) stayed marked clean
+    // and untracked with the contents of the moment of the copy, so it showed stale data until
+    // the game happened to write it again.
+    {
+        std::scoped_lock lk{image.mutex};
+        image.flags &= ~ImageFlagBits::Dirty;
+    }
+
     scheduler.EndRendering();
 
     const auto [in_buffer, in_offset] =
