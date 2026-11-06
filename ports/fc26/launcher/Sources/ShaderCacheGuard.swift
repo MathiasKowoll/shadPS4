@@ -15,6 +15,18 @@ enum ShaderCacheState: Equatable {
     case discarded
 }
 
+enum ShaderCacheImportError: LocalizedError {
+    case invalid(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .invalid(let name):
+            "\(name) is not a usable shader cache of the game. Choose a complete CUSA52342.zip "
+                + "from the user/cache folder of another player or port data folder."
+        }
+    }
+}
+
 private enum ArchiveCheck {
     case valid(ShaderCacheSummary)
     case unchecked(Int64)
@@ -42,6 +54,29 @@ enum ShaderCacheGuard {
         case .unchecked(let bytes): return .unchecked(bytes)
         case .damaged: return .damaged
         }
+    }
+
+    static func validSummary(of archive: URL) -> ShaderCacheSummary? {
+        guard case .valid(let summary) = check(archive), summary.shaders > 0 else { return nil }
+        return summary
+    }
+
+    static func importCache(from source: URL, into data: PlayerData) throws -> ShaderCacheSummary {
+        guard source.lastPathComponent.hasPrefix(data.titleID),
+            let summary = validSummary(of: source)
+        else {
+            throw ShaderCacheImportError.invalid(source.lastPathComponent)
+        }
+        let manager = FileManager.default
+        try manager.createDirectory(
+            at: data.shaderCache.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if manager.fileExists(atPath: data.shaderCache.path) {
+            try manager.createDirectory(at: data.shaderBackups, withIntermediateDirectories: true)
+            try atomicCopy(
+                data.shaderCache, to: data.shaderBackups.appendingPathComponent("replaced.zip"))
+        }
+        try atomicCopy(source, to: data.shaderCache)
+        return summary
     }
 
     static func protect(_ data: PlayerData, engineRevision: String) -> ShaderCacheState {

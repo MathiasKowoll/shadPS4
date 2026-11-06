@@ -232,7 +232,12 @@ Variables:
    shadPS4 engine runs (also under a renamed binary such as `shadps4.diag`), or while another
    launcher uses the same player folder. The first run with an empty
    shader cache explains that early runs stutter while shaders compile.
-7. Shader cache: before and after every run the launcher tests `user/cache/CUSA52342.zip`. A
+7. Shader cache: before and after every run the launcher tests `user/cache/CUSA52342.zip`.
+   Import copies a valid `CUSA52342*.zip` from another player or port data folder into the
+   player (the previous cache is kept as `shader-cache/replaced.zip`) and remembers it in the
+   user default `ShaderCacheSeed`; player folders created later start with a copy of it, so the
+   engine builds those pipelines at boot instead of compiling them during play. A cache made by
+   a different engine profile is set aside by the engine. Packages never contain a cache. A
    valid archive is copied to `shader-cache/backup.zip`; an archive left incomplete by a crash is
    kept as `shader-cache/damaged.zip` and replaced by that backup, or by the latest `run.sh`
    snapshot in a development data folder. Quitting the launcher waits for the check after a run.

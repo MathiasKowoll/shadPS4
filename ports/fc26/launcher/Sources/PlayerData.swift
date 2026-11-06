@@ -103,7 +103,7 @@ struct PlayerData {
         return !GameDumpInspector.isDirectory(URL(fileURLWithPath: "/Volumes/\(components[2])"))
     }
 
-    func prepare(seedConfig: URL) throws {
+    func prepare(seedConfig: URL, seedCache: URL? = nil) throws {
         let manager = FileManager.default
         guard !isOnMissingVolume else {
             throw PlayerDataError.unavailable(root)
@@ -112,13 +112,17 @@ struct PlayerData {
             for folder in [systemModules, logs, metrics, shaderBackups] {
                 try manager.createDirectory(at: folder, withIntermediateDirectories: true)
             }
-            if !manager.fileExists(atPath: engineConfig.path) {
+            let isNew = !manager.fileExists(atPath: engineConfig.path)
+            if isNew {
                 try manager.copyItem(at: seedConfig, to: engineConfig)
                 var config = try loadEngineConfig()
                 merge(&config, "GPU", ["full_screen": true])
                 try writeEngineConfig(config)
             }
             try createFirstUserHome()
+            if isNew, let seedCache, !manager.fileExists(atPath: shaderCache.path) {
+                _ = try? ShaderCacheGuard.importCache(from: seedCache, into: self)
+            }
         } catch {
             throw PlayerDataError.notWritable(root)
         }

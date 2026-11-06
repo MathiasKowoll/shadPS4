@@ -37,6 +37,7 @@ final class LauncherModel {
         static let playerFolder = "PlayerFolder"
         static let recentPlayers = "RecentPlayerFolders"
         static let verifiedGame = "VerifiedGameFingerprint"
+        static let shaderCacheSeed = "ShaderCacheSeed"
     }
 
     let profile: PortProfile?
@@ -57,6 +58,7 @@ final class LauncherModel {
     private(set) var missingModules: [String] = []
     private(set) var squads: [SquadSave] = []
     private(set) var isInstallingSquads = false
+    private(set) var isImportingCache = false
     private(set) var cacheState = ShaderCacheState.empty
     private(set) var engineSettings = EngineSettings()
     private(set) var launcherSettings = LauncherSettings()
@@ -272,8 +274,10 @@ final class LauncherModel {
         squads = []
         cacheState = .empty
         isCheckingPlayer = true
+        let seedCache = shaderCacheSeed
         Task.detached(priority: .userInitiated) {
-            let snapshot = PlayerSnapshot(data, seedConfig: seedConfig, inspectCache: true)
+            let snapshot = PlayerSnapshot(
+                data, seedConfig: seedConfig, seedCache: seedCache, inspectCache: true)
             await MainActor.run {
                 LauncherModel.shared.applyPlayer(snapshot, generation: generation)
             }
@@ -496,6 +500,58 @@ final class LauncherModel {
         showInfo("Squads installed", message)
     }
 
+    var shaderCacheSeed: URL? {
+        UserDefaults.standard.string(forKey: Keys.shaderCacheSeed)
+            .map { URL(fileURLWithPath: $0) }
+    }
+
+    func importShaderCache() {
+        guard let player else { return }
+        let panel = NSOpenPanel()
+        panel.title = "Import Shader Cache"
+        panel.message =
+            "Choose a shader cache (\(titleID).zip) from the user/cache folder of another player or "
+            + "port data folder. New players will start with it too."
+        panel.prompt = "Import"
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [.zip]
+        guard panel.runModal() == .OK, let source = panel.url else { return }
+        isImportingCache = true
+        Task.detached(priority: .userInitiated) {
+            let outcome: (ShaderCacheSummary?, String?)
+            do {
+                outcome = (try ShaderCacheGuard.importCache(from: source, into: player), nil)
+            } catch {
+                outcome = (nil, error.localizedDescription)
+            }
+            await MainActor.run {
+                LauncherModel.shared.finishCacheImport(
+                    outcome.0, failure: outcome.1, source: source, for: player.root)
+            }
+        }
+    }
+
+    private func finishCacheImport(
+        _ summary: ShaderCacheSummary?, failure: String?, source: URL, for root: URL
+    ) {
+        isImportingCache = false
+        guard let summary else {
+            showError("The shader cache could not be imported", failure ?? "")
+            return
+        }
+        UserDefaults.standard.set(source.path, forKey: Keys.shaderCacheSeed)
+        if player?.root == root {
+            cacheState = .valid(summary)
+        }
+        showInfo(
+            "Shader cache imported",
+            "This player now starts with \(summary.shaders) shaders and \(summary.pipelines) "
+                + "pipelines, which the engine builds before the game starts. New players will "
+                + "start with the same cache.")
+    }
+
     func showSaves() {
         guard let player else { return }
         try? FileManager.default.createDirectory(
@@ -547,7 +603,8 @@ final class LauncherModel {
                 playerGeneration: playerGeneration,
                 rosettaInstalled: HostCheck.rosettaInstalled(),
                 game: GameDumpInspector.inspect(game.chosenFolder, profile: profile),
-                player: PlayerSnapshot(player, seedConfig: seedConfig, inspectCache: false),
+                player: PlayerSnapshot(
+                    player, seedConfig: seedConfig, seedCache: nil, inspectCache: false),
                 runningEngines: HostCheck.runningEngines())
             await MainActor.run {
                 LauncherModel.shared.continuePlay(check)
@@ -873,10 +930,10 @@ private struct PlayerSnapshot {
 
     var isUsable: Bool { error == nil || configUnreadable }
 
-    init(_ data: PlayerData, seedConfig: URL, inspectCache: Bool) {
+    init(_ data: PlayerData, seedConfig: URL, seedCache: URL?, inspectCache: Bool) {
         self.data = data
         do {
-            try data.prepare(seedConfig: seedConfig)
+            try data.prepare(seedConfig: seedConfig, seedCache: seedCache)
         } catch {
             self.error = error.localizedDescription
             return

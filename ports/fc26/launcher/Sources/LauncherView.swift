@@ -226,7 +226,11 @@ struct LauncherView: View {
     private var cacheAndLogsSection: some View {
         Section {
             LabeledContent("Shader cache") {
-                Text(cacheDescription).multilineTextAlignment(.trailing)
+                HStack {
+                    Text(cacheDescription).multilineTextAlignment(.trailing)
+                    Button("Import…") { model.importShaderCache() }
+                        .disabled(model.player == nil || model.isImportingCache)
+                }
             }
             StatusLine(
                 .info,
@@ -245,8 +249,11 @@ struct LauncherView: View {
             Text("Shader cache and logs")
         } footer: {
             Text(
-                "Each run writes logs/last-run.console.log in the player folder and keeps the "
-                    + "previous run next to it. The detailed log goes to user/log.")
+                "Import copies a shader cache from another player or port data folder on this "
+                    + "Mac; the engine builds its pipelines before the game starts, and new players "
+                    + "start with the last imported cache. The launcher never downloads or bundles "
+                    + "caches. Each run writes logs/last-run.console.log in the player folder and "
+                    + "keeps the previous run next to it. The detailed log goes to user/log.")
         }
     }
 
