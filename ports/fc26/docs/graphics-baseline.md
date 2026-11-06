@@ -104,10 +104,16 @@ Defaults that define the base:
 Known issues in the base, to be fixed one at a time and validated against these scenes before
 they join it:
 
-1. Goalkeepers sometimes wear the outfield kit. With a warm shader cache it happened in two of
-   three runs of one build and data folder on 2026-11-05 and not in the third, so the cache alone
-   does not decide it. The kit is decided while the match loads.
-2. Occasional flashes or artifacts in cinematics.
+1. Fixed on 2026-11-05 (`080e5cbf`): goalkeepers wore the outfield kit in most runs because
+   `run.sh` forced menus to 60 FPS, which halves a frame-counted wait while the goalkeeper kit is
+   prepared. The game's own flip rate is now the default (menus at 30 as on the console, play at
+   60), and the player saw both goalkeepers in their own kits in a full match.
+2. Occasional flashes or artifacts in cinematics; the crowd card display in the first cinematic
+   alternates good and broken frames.
+4. Some textures stay black (corner flag pole, pitch-side camera, a large panel behind the pause
+   menu): in the 2026-11-05 match, 17 textures were uploaded while their memory was still zero and
+   never again. `InvalidateMemoryFromGPU` only marks the image that starts at a GPU write's address
+   and the images packed right after it, so images inside a larger GPU write keep old contents.
 3. Play still drops below 60 in heavier camera angles; the GPU thread (`GpuCommandProcessor`) is
    the bottleneck at 80-90% of a core while the Mac GPU sits near 55%.
 
