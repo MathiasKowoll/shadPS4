@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <charconv>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <optional>
@@ -163,10 +164,56 @@ s32 PS4_SYSV_ABI sceVideoOutRegisterBuffers(s32 handle, s32 startIndex, void* co
     return driver->RegisterBuffers(port, startIndex, addresses, bufferNum, attribute);
 }
 
+/// SHADPS4_LOAD_SCREEN_RATE=N (experiment): when the game asks for 60 FPS after at least
+/// SHADPS4_LOAD_SCREEN_AFTER_MS at a lower rate (menus), flips use rate N for up to
+/// SHADPS4_LOAD_SCREEN_MS, or until the game asks for a lower rate again. FC26 asks for 60 on its
+/// match loading screen, which then lasts about two seconds; in every traced run where the home
+/// goalkeeper wore the outfield kit, the game opened the data file it reads next only after that
+/// screen had started.
+struct LoadScreenPacing {
+    s32 rate = 0;
+    s64 after_ns = 0;
+    s64 length_ns = 0;
+};
+
+static const LoadScreenPacing& GetLoadScreenPacing() {
+    static const LoadScreenPacing pacing = [] {
+        const auto read = [](const char* name, s64 fallback) {
+            const char* value = std::getenv(name);
+            return value != nullptr && value[0] != '\0' ? std::strtoll(value, nullptr, 10)
+                                                       : fallback;
+        };
+        return LoadScreenPacing{
+            .rate = static_cast<s32>(read("SHADPS4_LOAD_SCREEN_RATE", 0)),
+            .after_ns = read("SHADPS4_LOAD_SCREEN_AFTER_MS", 5000) * 1'000'000,
+            .length_ns = read("SHADPS4_LOAD_SCREEN_MS", 4000) * 1'000'000,
+        };
+    }();
+    return pacing;
+}
+
 s32 PS4_SYSV_ABI sceVideoOutSetFlipRate(s32 handle, s32 rate) {
     const s32 effective_rate = GetFlipRateOverride().value_or(rate);
     LOG_INFO(Lib_VideoOut, "requested rate = {}, effective rate = {}", rate, effective_rate);
-    driver->GetPort(handle)->flip_rate = effective_rate;
+    auto* port = driver->GetPort(handle);
+    const s64 now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now().time_since_epoch())
+                        .count();
+    const auto& pacing = GetLoadScreenPacing();
+    if (pacing.rate > 0 && rate == 0 && port->requested_flip_rate >= 1 &&
+        now - port->requested_since_ns >= pacing.after_ns) {
+        port->slow_rate.store(pacing.rate, std::memory_order_relaxed);
+        port->slow_until_ns.store(now + pacing.length_ns, std::memory_order_relaxed);
+        LOG_INFO(Lib_VideoOut, "Load screen pacing: flip rate {} for up to {} ms", pacing.rate,
+                 pacing.length_ns / 1'000'000);
+    } else if (rate >= 1) {
+        port->slow_until_ns.store(0, std::memory_order_relaxed);
+    }
+    if (rate != port->requested_flip_rate) {
+        port->requested_flip_rate = rate;
+        port->requested_since_ns = now;
+    }
+    port->flip_rate = effective_rate;
     return ORBIS_OK;
 }
 

@@ -7,6 +7,7 @@
 #include "common/polyfill_thread.h"
 #include "core/libraries/videoout/video_out.h"
 
+#include <atomic>
 #include <condition_variable>
 #include <mutex>
 #include <queue>
@@ -32,6 +33,12 @@ struct VideoOutPort {
     std::condition_variable vo_cv;
     std::condition_variable vblank_cv;
     int flip_rate = 0;
+    /// Rate the game last asked for, and when (steady clock, ns): the override hides it.
+    s32 requested_flip_rate = 0;
+    s64 requested_since_ns = 0;
+    /// While the steady clock is below slow_until_ns, flips use at least slow_rate.
+    std::atomic<s32> slow_rate{0};
+    std::atomic<s64> slow_until_ns{0};
     int prev_index = -1;
     bool is_open = false;
     bool is_hdr = false;

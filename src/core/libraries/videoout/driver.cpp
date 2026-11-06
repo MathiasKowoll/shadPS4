@@ -366,7 +366,19 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
 
         // Check if it's time to take a request.
         auto& vblank_status = main_port.vblank_status;
-        if (vblank_status.count % (main_port.flip_rate + 1) == 0) {
+        s32 flip_rate = main_port.flip_rate;
+        if (const s64 slow_until = main_port.slow_until_ns.load(std::memory_order_relaxed);
+            slow_until != 0) {
+            const s64 now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                std::chrono::steady_clock::now().time_since_epoch())
+                                .count();
+            if (now < slow_until) {
+                flip_rate = std::max(flip_rate, main_port.slow_rate.load(std::memory_order_relaxed));
+            } else {
+                main_port.slow_until_ns.store(0, std::memory_order_relaxed);
+            }
+        }
+        if (vblank_status.count % (flip_rate + 1) == 0) {
             const auto request = receive_request();
             if (!request) {
                 if (timer.GetTotalWait().count() < 0) { // Dont draw too fast
