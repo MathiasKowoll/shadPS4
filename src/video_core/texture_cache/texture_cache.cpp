@@ -1437,7 +1437,9 @@ void TextureCache::RunGarbageCollector() {
         if (std::filesystem::exists(refresh_file, ec)) {
             std::filesystem::remove(refresh_file, ec);
             u32 marked{};
-            image_lru_cache.ForEachItemBelow(~u64{0}, [&](Image& image) {
+            // Every image was last touched at or before gc_tick. A larger value would wrap
+            // negative in the cache's signed comparison and stop before the first item.
+            image_lru_cache.ForEachItemBelow(gc_tick, [&](Image& image) {
                 if (!image.usage.render_target && !image.usage.depth_target &&
                     !image.usage.storage && !image.usage.vo_surface) {
                     image.flags |= ImageFlagBits::CpuDirty;
