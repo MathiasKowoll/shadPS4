@@ -5,6 +5,9 @@
 #include <climits>
 #include <condition_variable>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <ctime>
 #include <map>
 #include <mutex>
 #include <unordered_map>
@@ -39,6 +42,7 @@
 #include "core/libraries/kernel/file_system.h"
 #include "core/libraries/kernel/orbis_error.h"
 #include "core/libraries/kernel/posix_error.h"
+#include "core/libraries/kernel/threads/pthread.h"
 #include "core/libraries/libs.h"
 #include "core/libraries/net/net_kernel.h"
 #include "core/memory.h"
@@ -634,6 +638,57 @@ s64 PS4_SYSV_ABI sceKernelWrite(s32 fd, const void* buf, u64 nbytes) {
 
 static thread_local std::vector<u8> file_buf{};
 
+namespace {
+
+// Diagnostic: SHADPS4_READ_TRACE=<file> writes one line per read of a game file (/app0):
+// wall-clock time, guest thread, path, offset, requested and returned size.
+struct ReadTrace {
+    std::mutex mutex;
+    std::FILE* out = nullptr;
+};
+
+ReadTrace* GetReadTrace() {
+    static ReadTrace* trace = []() -> ReadTrace* {
+        const char* path = std::getenv("SHADPS4_READ_TRACE");
+        if (path == nullptr || path[0] == '\0') {
+            return nullptr;
+        }
+        std::FILE* out = std::fopen(path, "w");
+        if (out == nullptr) {
+            LOG_ERROR(Kernel_Fs, "SHADPS4_READ_TRACE: cannot open {}", path);
+            return nullptr;
+        }
+        auto* t = new ReadTrace();
+        t->out = out;
+        LOG_WARNING(Kernel_Fs, "SHADPS4_READ_TRACE: tracing game file reads to {}", path);
+        return t;
+    }();
+    return trace;
+}
+
+void TraceRead(ReadTrace* trace, const Core::FileSys::File* file, s64 offset, u64 nbytes,
+               s64 bytes) {
+    if (!file->m_guest_name.starts_with("/app0/")) {
+        return;
+    }
+    const auto now = std::chrono::system_clock::now();
+    const auto time = std::chrono::system_clock::to_time_t(now);
+    const auto ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count() %
+        1000;
+    std::tm local{};
+    localtime_r(&time, &local);
+    const char* thread = g_curthread != nullptr ? g_curthread->name.c_str() : "host";
+    std::scoped_lock lk{trace->mutex};
+    std::fprintf(trace->out, "%02d:%02d:%02d.%03d %s %s %lld %llu %lld\n", local.tm_hour,
+                 local.tm_min, local.tm_sec, static_cast<int>(ms), thread,
+                 file->m_guest_name.c_str(), static_cast<long long>(offset),
+                 static_cast<unsigned long long>(nbytes), static_cast<long long>(bytes));
+    std::fflush(trace->out);
+}
+
+} // namespace
+
 s64 ReadFile(Core::FileSys::File* file, void* buf, u64 nbytes) {
     if (nbytes == 0) {
         return 0;
@@ -646,7 +701,12 @@ s64 ReadFile(Core::FileSys::File* file, void* buf, u64 nbytes) {
     if (file_buf.capacity() < nbytes) {
         file_buf.reserve(nbytes);
     }
+    auto* trace = GetReadTrace();
+    const s64 offset = trace != nullptr ? static_cast<s64>(file->Tell()) : 0;
     s64 bytes = file->Read(file_buf.data(), nbytes);
+    if (trace != nullptr) {
+        TraceRead(trace, file, offset, nbytes, bytes);
+    }
     if (bytes < 0) {
         return bytes;
     }
