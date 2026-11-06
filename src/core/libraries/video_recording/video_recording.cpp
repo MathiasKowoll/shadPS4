@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstring>
+#include <string>
+
 #include "common/logging/log.h"
 #include "core/libraries/libs.h"
 #include "core/libraries/video_recording/video_recording.h"
@@ -12,6 +15,17 @@ s32 PS4_SYSV_ABI sceVideoRecordingSetInfo(OrbisVideoRecordingInfo set_info, cons
                                           u64 info_len) {
     LOG_ERROR(Lib_VideoRecording, "(STUBBED) called, set_info = {:#x}, info_len = {:#x}",
               static_cast<u32>(set_info), info_len);
+    if (info != nullptr && info_len > 0 && info_len <= 512 &&
+        (set_info == OrbisVideoRecordingInfo::Subtitle ||
+         set_info == OrbisVideoRecordingInfo::Description ||
+         set_info == OrbisVideoRecordingInfo::Comments ||
+         set_info == OrbisVideoRecordingInfo::Keywords)) {
+        // Diagnostic: the game sets these strings per screen.
+        const char* text = static_cast<const char*>(info);
+        std::string value(text, strnlen(text, info_len));
+        LOG_WARNING(Lib_VideoRecording, "info {:#x} text: '{}'", static_cast<u32>(set_info),
+                    value);
+    }
     if (set_info < OrbisVideoRecordingInfo::Subtitle ||
         (set_info > OrbisVideoRecordingInfo::Subtitle &&
          set_info < OrbisVideoRecordingInfo::Description) ||
