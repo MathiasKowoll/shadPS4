@@ -106,7 +106,11 @@ struct EngineRun {
             environment["DYLD_LIBRARY_PATH"].map { "\(engine.directory.path):\($0)" }
             ?? engine.directory.path
         environment["SHADPS4_FRAME_METRICS_PATH"] = data.metricsFile.path
-        environment.removeValue(forKey: "SHADPS4_VIDEOOUT_FLIP_RATE_OVERRIDE")
+        if launcherSettings.menusAt60 {
+            environment["SHADPS4_VIDEOOUT_FLIP_RATE_OVERRIDE"] = "0"
+        } else {
+            environment.removeValue(forKey: "SHADPS4_VIDEOOUT_FLIP_RATE_OVERRIDE")
+        }
         for key in [
             "SHADPS4_DEFER_UPLOADS", "SHADPS4_ASYNC_IMAGE_READBACK", "SHADPS4_FAULT_EXPAND",
         ]
@@ -174,7 +178,8 @@ struct EngineRun {
             "Player data: \(Self.display(data.root))",
             "Settings: fullscreen \(enabled(settings.fullscreen)), upscaling "
                 + "\(settings.upscaler.title), RCAS \(enabled(settings.rcas)), PS4 Pro mode "
-                + "\(enabled(settings.ps4Pro)), frame rate \(enabled(settings.showFPS)), Metal HUD "
+                + "\(enabled(settings.ps4Pro)), 60 FPS menus \(enabled(launcherSettings.menusAt60)), "
+                + "frame rate \(enabled(settings.showFPS)), Metal HUD "
                 + "\(enabled(launcherSettings.metalHUD)), detailed log "
                 + "\(enabled(launcherSettings.diagnosticLog))",
             "Missing system modules: \(data.missingModules().joined(separator: ", ").nonEmpty ?? "none")",

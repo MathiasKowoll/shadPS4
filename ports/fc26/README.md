@@ -218,20 +218,22 @@ Variables:
    `save-backups/` first. The game loads it from Customize > Profile > Load > Squads; loading an
    installed community save has not been confirmed in the port yet.
 5. Settings: fullscreen, frame-rate counter, upscaling, PS4 Pro mode (experimental,
-   `General.neo_mode`), the Metal HUD and a detailed log. New player folders start in fullscreen
-   with the frame-rate counter on, so macOS Game Mode turns on (below); the rest is off.
+   `General.neo_mode`), 60 FPS in menus, the Metal HUD and a detailed log. New player folders
+   start in fullscreen with the frame-rate counter on, so macOS Game Mode turns on (below); the
+   rest is off. 60 FPS in menus sets `SHADPS4_VIDEOOUT_FLIP_RATE_OVERRIDE=0` like
+   `FC26_FLIP_RATE_OVERRIDE=0`; off, the game's own rate applies (menus 30, play 60). The switch
+   warns that with 60 FPS menus the home goalkeeper wears the outfield kit in most matches.
    Upscaling is one choice: Bilinear (the default, the presenter's plain filter), FSR with
    optional RCAS, or MetalFX; the engine prefers MetalFX when both are set. Engine settings live
    in the player's `user/config.json`, as with `FC26_METALFX` and `FC26_PS4_PRO` in `run.sh`; the
-   Metal HUD and log choices in `launcher.json`.
+   Metal HUD, menu frame rate and log choices in `launcher.json`.
 6. Play: applies the defaults of `run.sh`'s performance profile (60 Hz vblank, the game's own
-   flip rate with no override, so menus run at 30 as the game asks and play at 60, logging off or
-   the diagnostic filter, `SHADPS4_DEFER_UPLOADS`, `SHADPS4_ASYNC_IMAGE_READBACK` and
-   `SHADPS4_FAULT_EXPAND` set to 1, frame metrics in `metrics/last-run.csv`) and starts the engine
-   from the player folder. It refuses to start without Rosetta 2, while another
-   shadPS4 engine runs (also under a renamed binary such as `shadps4.diag`), or while another
-   launcher uses the same player folder. The first run with an empty
-   shader cache explains that early runs stutter while shaders compile.
+   flip rate unless 60 FPS in menus is on, logging off or the diagnostic filter,
+   `SHADPS4_DEFER_UPLOADS`, `SHADPS4_ASYNC_IMAGE_READBACK` and `SHADPS4_FAULT_EXPAND` set to 1,
+   frame metrics in `metrics/last-run.csv`) and starts the engine from the player folder. It
+   refuses to start without Rosetta 2, while another shadPS4 engine runs (also under a renamed
+   binary such as `shadps4.diag`), or while another launcher uses the same player folder. The
+   first run with an empty shader cache explains that early runs stutter while shaders compile.
 7. Shader cache: before and after every run the launcher tests `user/cache/CUSA52342.zip`.
    Import copies a valid `CUSA52342*.zip` from another player or port data folder into the
    player (the previous cache is kept as `shader-cache/replaced.zip`) and remembers it in the

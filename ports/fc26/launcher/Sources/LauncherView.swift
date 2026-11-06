@@ -206,6 +206,12 @@ struct LauncherView: View {
             .pickerStyle(.segmented)
             Toggle("RCAS sharpening", isOn: engineBinding(\.rcas))
                 .disabled(model.engineSettings.upscaler != .fsr)
+            Toggle("60 FPS in menus", isOn: launcherBinding(\.menusAt60))
+            if model.launcherSettings.menusAt60 {
+                StatusLine(
+                    .warning,
+                    "With 60 FPS menus the home goalkeeper wears the outfield kit in most matches.")
+            }
             Toggle("PS4 Pro mode (experimental)", isOn: engineBinding(\.ps4Pro))
             Toggle("Metal performance HUD", isOn: launcherBinding(\.metalHUD))
         } header: {
@@ -215,7 +221,8 @@ struct LauncherView: View {
                 "The game always renders at 1920×1080, the validated baseline. Upscaling only "
                     + "changes how that image reaches your display: Bilinear filtering (the "
                     + "default), FSR with optional RCAS sharpening, or Apple's MetalFX, which also "
-                    + "gives the window full Retina resolution. PS4 Pro mode tells the game it runs on a PS4 Pro; it is "
+                    + "gives the window full Retina resolution. Off, 60 FPS in menus keeps the game's own rate: menus at 30 as on a "
+                    + "PS4, matches at 60. PS4 Pro mode tells the game it runs on a PS4 Pro; it is "
                     + "experimental, and the known issue is a square of noise around the "
                     + "controlled-player marker. The Metal HUD is Apple's performance overlay for "
                     + "diagnostics. Connect your controller before you press Play.")
