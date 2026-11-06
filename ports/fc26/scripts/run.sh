@@ -15,7 +15,10 @@ log_filter=${FC26_LOG_FILTER:-*:warning Render.Vulkan:info}
 metrics_enabled=${FC26_METRICS:-1}
 metal_hud_enabled=${FC26_METAL_HUD:-0}
 vblank_frequency=${FC26_VBLANK_FREQUENCY:-60}
-flip_rate_override=${FC26_FLIP_RATE_OVERRIDE:-0}
+# auto honours the game's sceVideoOutSetFlipRate. FC26 asks for 30 FPS in menus and loading, as on
+# a PS4; forcing 0 (menus at 60) left the home goalkeeper in the outfield kit in most runs, because
+# the kit is prepared during a wait the game counts in frames. Gameplay still runs at 60.
+flip_rate_override=${FC26_FLIP_RATE_OVERRIDE:-auto}
 trace_imports=${FC26_TRACE_IMPORTS:-}
 patch_file=${FC26_PATCH_FILE:-}
 network_mode=${FC26_NETWORK:-preserve}
