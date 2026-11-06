@@ -160,17 +160,25 @@ high pixel density when FSR is enabled too.
 - **Setup:** build `c2079691` plus the window change, a 1600x900 point window, warm cache.
   Manchester United against Liverpool at Old Trafford, in rain.
 - **FSR+RCAS alone** (MetalFX off, RCAS attenuation 0.25): the presented image was 3200x1800 from
-  the title screen on. Covered: title, main menu, Kick Off screens, match intro, kickoff wide
+  the title screen on. Captured: title, main menu, Kick Off screens, match intro, kickoff wide
   camera and play, and a goal celebration close-up with kit names and numbers. No Vulkan or Metal
   errors in the log.
-- **Against MetalFX:** in an earlier run with the previous build, MetalFX was enabled and
-  `SHADPS4_METALFX_OFF_FILE` switched the same paused frame between the two. The menu text was
-  equally sharp at full size, with no artifacts from either.
-- **User report:** in that earlier run the user reported graphics glitches. The captures show only
-  the drops on the lens and the replay transition wipe, so the report is not confirmed.
+- **Defects in that run:** the user saw broken LED boards and a dark background behind the goal,
+  with the home goalkeeper in his own kit. The play capture confirms the boards: one panel is
+  drawn on the far touchline.
+- **Not caused by FSR's images:** an earlier run with the previous build had MetalFX enabled. Its
+  kickoff capture shows the boards already broken (two panels drawn) while MetalFX presented and
+  before FSR had run at all; the user also reported graphics errors in it.
+- **Texture cache evictions:** the same in both runs as in the 2026-11-05 MetalFX, Pro and base
+  matches. About 5 per second from the start of the match, with no eviction downloads: 610 and 730
+  here, against 1137, 1040 and 1122 there. On 2026-11-05 the boards were intact in the runs where
+  the goalkeeper wore the outfield kit.
+- **Against MetalFX:** in the earlier run, `SHADPS4_METALFX_OFF_FILE` switched the same paused frame
+  between the two. The menu text was equally sharp at full size, with no artifacts from either.
 - **Frame cost:** not measured. Spotlight indexing kept the load average at 20-32 on 16 cores, and
-  during the second run another emulator (FC27) ran at the same time. The menus held 60 FPS.
-- **Not covered:** tunnel or walkout, replays, a full played match, and return to the menu.
+  during the second run another emulator instance ran at the same time. The menus held 60 FPS.
+- **Not covered:** tunnel or walkout, replays, a full played match, and return to the menu. FSR
+  stays off by default.
 
 ### Experimental option: PS4 Pro mode (off by default)
 
