@@ -110,7 +110,12 @@ they join it:
    30, all wrong) and was reverted. Runs got it right when the load was slower (a cold shader cache,
    or diagnostic builds that hash every large texture upload). In every traced wrong run the game
    opened `installpackage_02/cas_02.cas` only after the loading screen had started (it asks for
-   60 FPS there), with about two seconds left before the intro.
+   60 FPS there), with about two seconds left before the intro. Pacing that screen, a cold cache,
+   and reading back every linear image did not help either.
+   Workaround seen once, to confirm: in Kick Off > Match Preview > Select Kits, change the team's
+   kit and rotate through the kits back to the one you want. The player did this in a fresh player
+   folder with the PSPulse squads, and both goalkeepers wore their own kits; selecting the kits
+   probably makes the game load every kit, the goalkeepers' included, before the match loads.
 2. Occasional flashes or artifacts in cinematics; the crowd card display in the first cinematic
    alternates good and broken frames.
 3. Play still drops below 60 in heavier camera angles; the GPU thread (`GpuCommandProcessor`) is
