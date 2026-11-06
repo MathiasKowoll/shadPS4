@@ -86,7 +86,15 @@ fi
 
 app_name=$(plutil -extract CFBundleName raw "$launcher_dir/Info.plist")
 launcher_version=$(plutil -extract CFBundleShortVersionString raw "$launcher_dir/Info.plist")
-package_name=FC26Port-$launcher_version-$engine_revision-macos-arm64
+launcher_revision=$(git -C "$repo_dir" rev-parse --short=12 HEAD)
+if [[ -n $(git -C "$repo_dir" status --porcelain --untracked-files=no -- ports/fc26) ]]; then
+    launcher_revision+=-dirty
+fi
+if [[ $launcher_revision == "$engine_revision" ]]; then
+    package_name=FC26Port-$launcher_version-$engine_revision-macos-arm64
+else
+    package_name=FC26Port-$launcher_version-$launcher_revision-engine-$engine_revision-macos-arm64
+fi
 destination=$package_dir/$package_name
 if [[ -e $destination ]]; then
     echo "STOP: $destination already exists; move it away or set FC26_PACKAGE_DIR" >&2
@@ -124,6 +132,7 @@ cat >"$contents/Resources/build-info.json" <<EOF
 {
   "engine_revision": "$engine_revision",
   "kosmickrisp_revision": "$kosmickrisp_revision",
+  "launcher_revision": "$launcher_revision",
   "launcher_version": "$launcher_version",
   "minimum_macos": "$minimum_macos",
   "packaged_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"

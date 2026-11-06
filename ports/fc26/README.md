@@ -164,7 +164,8 @@ FC26_BUILD_DIR=/path/to/engine-build ports/fc26/scripts/package.sh
 
 The script compiles the SwiftUI launcher in `launcher/Sources/` for arm64 and writes
 `FC26Port-<version>-<engine revision>-macos-arm64/` with the application, a zip archive and its
-SHA-256. It never overwrites an existing package. The application contains:
+SHA-256; when the launcher comes from a later commit than the engine, the name carries both
+revisions. It never overwrites an existing package. The application contains:
 
 - `Contents/MacOS/`: the launcher, the x86-64 `shadps4` engine, the `libvulkan.dylib` loader and
   `libvulkan_kosmickrisp.dylib`, with debug symbols stripped, plus a link to the KosmicKrisp ICD.
@@ -215,8 +216,9 @@ Variables:
 5. Play: applies the defaults of `run.sh`'s performance profile (60 Hz vblank, flip-rate override
    0, logging off or the diagnostic filter, `SHADPS4_DEFER_UPLOADS`, `SHADPS4_ASYNC_IMAGE_READBACK`
    and `SHADPS4_FAULT_EXPAND` set to 1, frame metrics in `metrics/last-run.csv`) and starts the
-   engine from the player folder. It refuses to start without Rosetta 2, while another `shadps4`
-   runs, or while another launcher uses the same player folder. The first run with an empty
+   engine from the player folder. It refuses to start without Rosetta 2, while another
+   shadPS4 engine runs (also under a renamed binary such as `shadps4.diag`), or while another
+   launcher uses the same player folder. The first run with an empty
    shader cache explains that early runs stutter while shaders compile.
 6. Shader cache: before and after every run the launcher tests `user/cache/CUSA52342.zip`. A
    valid archive is copied to `shader-cache/backup.zip`; an archive left incomplete by a crash is

@@ -3,11 +3,13 @@ import Foundation
 
 struct BuildInfo: Decodable {
     let launcherVersion: String
+    let launcherRevision: String?
     let engineRevision: String
     let kosmicKrispRevision: String
 
     private enum CodingKeys: String, CodingKey {
         case launcherVersion = "launcher_version"
+        case launcherRevision = "launcher_revision"
         case engineRevision = "engine_revision"
         case kosmicKrispRevision = "kosmickrisp_revision"
     }
@@ -54,7 +56,7 @@ enum HostCheck {
     }
 
     static func runningEngines() -> [Int32] {
-        run("/usr/bin/pgrep", ["-x", "shadps4"]).output
+        run("/usr/bin/pgrep", ["-ix", "shadps4(\\..+)?"]).output
             .split(whereSeparator: \.isNewline)
             .compactMap { Int32($0) }
     }
@@ -159,7 +161,8 @@ struct EngineRun {
     private var header: String {
         let enabled = { (value: Bool) in value ? "on" : "off" }
         var lines = [
-            "FC26 Port launcher \(buildInfo?.launcherVersion ?? "development build")",
+            "FC26 Port launcher \(buildInfo?.launcherVersion ?? "development build") "
+                + "(\(buildInfo?.launcherRevision ?? "unknown revision"))",
             "Engine: \(buildInfo?.engineRevision ?? "unknown"), KosmicKrisp: "
                 + "\(buildInfo?.kosmicKrispRevision ?? "unknown")",
             "Game: \(game.titleID) \(game.appVersion) in \(Self.display(game.baseFolder))",

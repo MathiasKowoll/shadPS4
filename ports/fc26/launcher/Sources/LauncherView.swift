@@ -308,7 +308,10 @@ struct LauncherView: View {
 
     private var versionLine: String {
         guard let info = model.buildInfo else { return "Development build" }
-        return "Launcher \(info.launcherVersion) · engine \(info.engineRevision) · KosmicKrisp "
+        let launcher =
+            info.launcherRevision.map { "\(info.launcherVersion) (\($0))" }
+            ?? info.launcherVersion
+        return "Launcher \(launcher) · engine \(info.engineRevision) · KosmicKrisp "
             + info.kosmicKrispRevision
     }
 
