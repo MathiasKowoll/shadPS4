@@ -149,6 +149,29 @@ camera shows straight dark diagonal lines and drops on the lens; they look like 
 rig and the rain, but they were not compared with the scaler off. Still not covered: tunnel or
 walkout, a played match from kickoff to the final whistle, and return to the menu.
 
+### Option: FSR with RCAS at the display's pixel size (off by default)
+
+Branch `fc26-fsr-hidpi`, recorded on 2026-11-06. FSR and its RCAS sharpening only run when the
+presented frame is larger than the game's 1920x1080 image. Before this branch the window had high
+pixel density only with MetalFX. A 1600x900 point window therefore gave a 1600x900 frame, and FSR
+skipped every frame on a Retina display, also when the launcher enabled it. The window now has
+high pixel density when FSR is enabled too.
+
+- **Setup:** build `c2079691` plus the window change, a 1600x900 point window, warm cache.
+  Manchester United against Liverpool at Old Trafford, in rain.
+- **FSR+RCAS alone** (MetalFX off, RCAS attenuation 0.25): the presented image was 3200x1800 from
+  the title screen on. Covered: title, main menu, Kick Off screens, match intro, kickoff wide
+  camera and play, and a goal celebration close-up with kit names and numbers. No Vulkan or Metal
+  errors in the log.
+- **Against MetalFX:** in an earlier run with the previous build, MetalFX was enabled and
+  `SHADPS4_METALFX_OFF_FILE` switched the same paused frame between the two. The menu text was
+  equally sharp at full size, with no artifacts from either.
+- **User report:** in that earlier run the user reported graphics glitches. The captures show only
+  the drops on the lens and the replay transition wipe, so the report is not confirmed.
+- **Frame cost:** not measured. Spotlight indexing kept the load average at 20-32 on 16 cores, and
+  during the second run another emulator (FC27) ran at the same time. The menus held 60 FPS.
+- **Not covered:** tunnel or walkout, replays, a full played match, and return to the menu.
+
 ### Experimental option: PS4 Pro mode (off by default)
 
 `FC26_PS4_PRO=1`, recorded on 2026-11-05.
