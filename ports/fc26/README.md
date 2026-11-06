@@ -135,9 +135,12 @@ presenter scales that image to the window's real pixel size with Apple's MetalFX
 instead of the bilinear filter, as an alternative to FSR. It is off by default and can also be
 toggled in the developer menu under Display > MetalFX.
 
-- The window is created with high pixel density while the option is enabled, so on a Retina
-  display the presented image is sized in physical pixels (a 1600x900 window draws 3200x1800).
-  Without it macOS draws the window at point size and stretches it, and no upscaler can help.
+- The window is created with high pixel density while MetalFX or FSR (`GPU.fsr_enabled`) is
+  enabled, so on a Retina display the presented image is sized in physical pixels (a 1600x900
+  window draws 3200x1800). Without it macOS draws the window at point size and stretches it, and
+  no upscaler can help: FSR, and the RCAS sharpening that runs inside it, skip any frame that is
+  not larger than the game's 1920x1080 image. When both are enabled, MetalFX scales and FSR is
+  skipped.
 - KosmicKrisp has no `VK_EXT_metal_objects`. The scaler images are allocated as dedicated memory
   whose MTLHeap is exported with `VK_EXT_external_memory_metal`; a Metal texture with the same
   descriptor KosmicKrisp uses is placed at offset 0 of that heap. The post-processing pass renders

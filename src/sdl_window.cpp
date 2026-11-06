@@ -131,10 +131,10 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, Input::GameControllers* controller
     SDL_SetNumberProperty(props, "flags", SDL_WINDOW_VULKAN);
     SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_RESIZABLE_BOOLEAN, true);
 #ifdef __APPLE__
-    // MetalFX scales to the drawable size, which only matches the display pixels on Retina
-    // screens when the window has a high pixel density.
+    // MetalFX and FSR scale to the drawable size, which only matches the display pixels on
+    // Retina screens when the window has a high pixel density.
     SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_HIGH_PIXEL_DENSITY_BOOLEAN,
-                           EmulatorSettings.IsMetalFxEnabled());
+                           EmulatorSettings.IsMetalFxEnabled() || EmulatorSettings.IsFsrEnabled());
 #endif
     // Creating the window directly in fullscreen avoids a visible windowed -> fullscreen
     // transition on startup. SDL sizes the window to the display and keeps the requested
