@@ -110,12 +110,13 @@ they join it:
    60), and the player saw both goalkeepers in their own kits in a full match.
 2. Occasional flashes or artifacts in cinematics; the crowd card display in the first cinematic
    alternates good and broken frames.
-4. Some textures stay black (corner flag pole, pitch-side camera, a large panel behind the pause
-   menu): in the 2026-11-05 match, 17 textures were uploaded while their memory was still zero and
-   never again. `InvalidateMemoryFromGPU` only marks the image that starts at a GPU write's address
-   and the images packed right after it, so images inside a larger GPU write keep old contents.
 3. Play still drops below 60 in heavier camera angles; the GPU thread (`GpuCommandProcessor`) is
    the bottleneck at 80-90% of a core while the Mac GPU sits near 55%.
+4. Some textures stay black (corner flag pole, pitch-side camera, a large panel behind the pause
+   menu): in the 2026-11-05 match, 17 textures were uploaded while their memory was still zero and
+   were not uploaded again. Suspected, not yet measured: `InvalidateMemoryFromGPU` only marks the
+   image that starts at a GPU write's address and the images packed right after it, so images
+   inside a larger GPU write keep their old contents.
 
 ### Second base: the 60 FPS commits
 
