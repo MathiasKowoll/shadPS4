@@ -198,7 +198,7 @@ struct LauncherView: View {
 
     private var settingsSection: some View {
         Section {
-            Toggle("Fullscreen", isOn: engineBinding(\.fullscreen))
+            Toggle("Fullscreen (turns on macOS Game Mode)", isOn: engineBinding(\.fullscreen))
             Toggle("Show frame rate", isOn: engineBinding(\.showFPS))
             Picker("Upscaling", selection: upscalerBinding) {
                 ForEach(Upscaler.allCases) { Text($0.title).tag($0) }

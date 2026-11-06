@@ -218,7 +218,8 @@ Variables:
    `save-backups/` first. The game loads it from Customize > Profile > Load > Squads; loading an
    installed community save has not been confirmed in the port yet.
 5. Settings: fullscreen, frame-rate counter, upscaling, PS4 Pro mode (experimental,
-   `General.neo_mode`), the Metal HUD and a detailed log, all off except the frame-rate counter.
+   `General.neo_mode`), the Metal HUD and a detailed log. New player folders start in fullscreen
+   with the frame-rate counter on, so macOS Game Mode turns on (below); the rest is off.
    Upscaling is one choice: Bilinear (the default, the presenter's plain filter), FSR with
    optional RCAS, or MetalFX; the engine prefers MetalFX when both are set. Engine settings live
    in the player's `user/config.json`, as with `FC26_METALFX` and `FC26_PS4_PRO` in `run.sh`; the
@@ -237,6 +238,14 @@ Variables:
 8. Logs: each run writes `logs/last-run.console.log` with a header naming the engine revision,
    game, player folder and settings, and keeps the previous run next to it. The detailed log goes
    to `user/log/`. The launcher shows both, and the exit code after an unexpected stop.
+
+macOS Game Mode: `gamepolicyd` recognizes the engine as a game from `GCSupportsGameMode` in the
+Info.plist embedded in `shadps4` (it logs `labelReason=LSSupportsGameMode`) and turns Game Mode
+on while the game is fullscreen and in front. Measured on 2026-11-05 with package
+`FC26Port-0.1-1bc7c95c3ff7`, MetalFX on: on within 0.5 s of the fullscreen window, paused each
+time another app came to the front and on again when the game returned, off when the game quit.
+In a window it stays off. `log stream --predicate 'process == "gamepolicyd"'` shows the
+transitions (`Game mode status is now on`).
 
 Players need Apple silicon, macOS 26 or later (the engine's deployment target) and Rosetta 2;
 the launcher shows the `softwareupdate --install-rosetta --agree-to-license` command when Rosetta

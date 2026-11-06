@@ -114,6 +114,9 @@ struct PlayerData {
             }
             if !manager.fileExists(atPath: engineConfig.path) {
                 try manager.copyItem(at: seedConfig, to: engineConfig)
+                var config = try loadEngineConfig()
+                merge(&config, "GPU", ["full_screen": true])
+                try writeEngineConfig(config)
             }
             try createFirstUserHome()
         } catch {
